@@ -200,6 +200,22 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case keyupMsg:
 		m.menu.ClearKeydown()
 		return m, nil
+	case instanceStartedMsg:
+		if msg.err != nil {
+			// Instance failed to start - remove it from the list
+			m.list.Kill()
+			return m, m.handleError(msg.err)
+		}
+		// Instance started successfully - save and update UI
+		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+			return m, m.handleError(err)
+		}
+		m.newInstanceFinalizer()
+		if m.autoYes {
+			msg.instance.AutoYes = true
+		}
+		m.newInstanceFinalizer()
+		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
 	case tickUpdateMetadataMessage:
 		for _, instance := range m.list.GetInstances() {
 			if !instance.Started() || instance.Paused() {
@@ -331,6 +347,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return m, m.handleError(fmt.Errorf("title cannot be empty"))
 			}
 
+			// If user pressed 'N' (prompt after name), collect prompt BEFORE creating worktree
+			if m.promptAfterName {
+				m.state = statePrompt
+				m.menu.SetState(ui.StatePrompt)
+				m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
+				m.promptAfterName = false
+				return m, tea.WindowSize()
+			}
+
+			// 'n' key path: no prompt needed, start immediately
 			if err := instance.Start(true); err != nil {
 				m.list.Kill()
 				m.state = stateDefault
@@ -348,16 +374,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 			m.newInstanceFinalizer()
 			m.state = stateDefault
-			if m.promptAfterName {
-				m.state = statePrompt
-				m.menu.SetState(ui.StatePrompt)
-				// Initialize the text input overlay
-				m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
-				m.promptAfterName = false
-			} else {
-				m.menu.SetState(ui.StateDefault)
-				m.showHelpScreen(helpStart(instance), nil)
-			}
+			m.menu.SetState(ui.StateDefault)
+			m.showHelpScreen(helpStart(instance), nil)
 
 			return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
 		case tea.KeyRunes:
@@ -405,24 +423,34 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if selected == nil {
 				return m, nil
 			}
-			if m.textInputOverlay.IsSubmitted() {
-				if err := selected.SendPrompt(m.textInputOverlay.GetValue()); err != nil {
-					// TODO: we probably end up in a bad state here.
-					return m, m.handleError(err)
-				}
-			}
 
-			// Close the overlay and reset state
+			wasCanceled := m.textInputOverlay.IsCanceled()
+			prompt := m.textInputOverlay.GetValue()
+
+			// Close overlay and reset state immediately for responsive UI
 			m.textInputOverlay = nil
 			m.state = stateDefault
-			return m, tea.Sequence(
-				tea.WindowSize(),
-				func() tea.Msg {
-					m.menu.SetState(ui.StateDefault)
-					m.showHelpScreen(helpStart(selected), nil)
-					return nil
-				},
-			)
+			m.menu.SetState(ui.StateDefault)
+
+			if wasCanceled {
+				// User pressed ESC - instance not started yet, remove from list
+				m.list.Kill()
+				return m, tea.WindowSize()
+			}
+
+			// Store prompt on instance - will be sent after Start()
+			selected.Prompt = prompt
+
+			// Set status to Loading while worktree is being created
+			selected.SetStatus(session.Loading)
+
+			// Start the instance asynchronously
+			startCmd := func() tea.Msg {
+				err := selected.Start(true)
+				return instanceStartedMsg{instance: selected, err: err}
+			}
+
+			return m, tea.Batch(tea.WindowSize(), startCmd)
 		}
 
 		return m, nil
@@ -673,6 +701,12 @@ type previewTickMsg struct{}
 type tickUpdateMetadataMessage struct{}
 
 type instanceChangedMsg struct{}
+
+// instanceStartedMsg is sent when an async instance start completes
+type instanceStartedMsg struct {
+	instance *session.Instance
+	err      error
+}
 
 // tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
 // overall the instances and capture their output. It's a pretty expensive operation. Let's do it 2x a second only.

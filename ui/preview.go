@@ -55,6 +55,18 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 	case instance == nil:
 		p.setFallbackState("No agents running yet. Spin up a new instance with 'n' to get started!")
 		return nil
+	case instance.Status == session.Loading:
+		p.setFallbackState(lipgloss.JoinVertical(lipgloss.Center,
+			"Creating worktree...",
+			"",
+			lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{
+					Light: "#808080",
+					Dark:  "#808080",
+				}).
+				Render("This may take a moment for large repositories."),
+		))
+		return nil
 	case instance.Status == session.Paused:
 		p.setFallbackState(lipgloss.JoinVertical(lipgloss.Center,
 			"Session is paused. Press 'r' to resume.",

@@ -248,6 +248,23 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 
 	i.SetStatus(Running)
 
+	// Send initial prompt if one was provided
+	if i.Prompt != "" {
+		// Brief delay to ensure the program is ready for input
+		time.Sleep(500 * time.Millisecond)
+		// Send keys directly to tmux (can't use SendPrompt as i.started isn't set yet)
+		if err := i.tmuxSession.SendKeys(i.Prompt); err != nil {
+			log.ErrorLog.Printf("failed to send initial prompt: %v", err)
+		} else {
+			// Brief pause to prevent carriage return from being interpreted as newline
+			time.Sleep(100 * time.Millisecond)
+			if err := i.tmuxSession.TapEnter(); err != nil {
+				log.ErrorLog.Printf("failed to tap enter after initial prompt: %v", err)
+			}
+		}
+		i.Prompt = "" // Clear after sending
+	}
+
 	return nil
 }
 
