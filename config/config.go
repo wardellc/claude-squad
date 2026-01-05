@@ -42,6 +42,8 @@ type Config struct {
 	DaemonPollInterval int `json:"daemon_poll_interval"`
 	// BranchPrefix is the prefix used for git branches created by the application.
 	BranchPrefix string `json:"branch_prefix"`
+	// Editor is the command to open worktrees in an editor (e.g., "code", "cursor")
+	Editor string `json:"editor,omitempty"`
 	// Repos is a list of configured repository paths
 	Repos []string `json:"repos,omitempty"`
 	// RepoUsageCounts tracks how many worktrees have been created per repo (for sorting)
@@ -62,7 +64,7 @@ func DefaultConfig() *Config {
 		DefaultProgram:     program,
 		AutoYes:            false,
 		DaemonPollInterval: 1000,
-		BranchPrefix: "",
+		BranchPrefix:       "",
 	}
 }
 

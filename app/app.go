@@ -431,6 +431,18 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.tabbedWindow.Toggle()
 		m.menu.SetInDiffTab(m.tabbedWindow.IsInDiffTab())
 		return m, m.instanceChanged()
+	case keys.KeyOpenEditor:
+		selected := m.list.GetSelectedInstance()
+		if selected == nil {
+			return m, nil
+		}
+		if m.appConfig.Editor == "" {
+			return m, m.handleError(fmt.Errorf("no editor configured in ~/.claude-squad/config.json"))
+		}
+		if err := selected.OpenInEditor(m.appConfig.Editor); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, nil
 	case keys.KeyKill:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil {

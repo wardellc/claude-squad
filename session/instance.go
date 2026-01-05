@@ -4,6 +4,7 @@ import (
 	"claude-squad/log"
 	"claude-squad/session/git"
 	"claude-squad/session/tmux"
+	"os/exec"
 	"path/filepath"
 
 	"fmt"
@@ -611,4 +612,39 @@ func (i *Instance) SendKeys(keys string) error {
 		return fmt.Errorf("cannot send keys to instance that has not been started or is paused")
 	}
 	return i.tmuxSession.SendKeys(keys)
+}
+
+// OpenInEditor opens the worktree directory in the specified editor
+func (i *Instance) OpenInEditor(editor string) error {
+	if !i.started {
+		return fmt.Errorf("cannot open editor: instance has not been started")
+	}
+	if i.Status == Paused {
+		return fmt.Errorf("cannot open editor: instance is paused (no worktree)")
+	}
+	if editor == "" {
+		return fmt.Errorf("no editor configured")
+	}
+
+	worktreePath := i.gitWorktree.GetWorktreePath()
+
+	var cmd *exec.Cmd
+	editorLower := strings.ToLower(editor)
+
+	// Use 'open -a' on macOS for GUI apps (Cursor, VS Code, etc.)
+	if strings.Contains(editorLower, "cursor") {
+		cmd = exec.Command("open", "-a", "Cursor", worktreePath)
+	} else if strings.Contains(editorLower, "code") || strings.Contains(editorLower, "visual studio") {
+		cmd = exec.Command("open", "-a", "Visual Studio Code", worktreePath)
+	} else {
+		// For other editors, try direct execution
+		cmd = exec.Command(editor, worktreePath)
+	}
+
+	// Start in background - don't wait for editor to close
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to open editor '%s': %w", editor, err)
+	}
+
+	return nil
 }
