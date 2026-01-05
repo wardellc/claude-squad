@@ -7,9 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // Setup creates a new worktree for the session
@@ -29,16 +26,11 @@ func (g *GitWorktree) Setup() error {
 		errChan <- os.MkdirAll(worktreesDir, 0755)
 	}()
 
-	// Goroutine for branch check
+	// Goroutine for branch check - use native git for speed
 	go func() {
-		repo, err := git.PlainOpen(g.repoPath)
-		if err != nil {
-			errChan <- fmt.Errorf("failed to open repository: %w", err)
-			return
-		}
-
-		branchRef := plumbing.NewBranchReferenceName(g.branchName)
-		if _, err := repo.Reference(branchRef, false); err == nil {
+		// Use git rev-parse which is faster than opening repo with go-git
+		cmd := exec.Command("git", "-C", g.repoPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+g.branchName)
+		if err := cmd.Run(); err == nil {
 			branchExists = true
 		}
 		errChan <- nil
@@ -74,26 +66,7 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 
 // setupNewWorktree creates a new worktree from HEAD
 func (g *GitWorktree) setupNewWorktree() error {
-	// Ensure worktrees directory exists
-	worktreesDir := filepath.Join(g.repoPath, "worktrees")
-	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
-		return fmt.Errorf("failed to create worktrees directory: %w", err)
-	}
-
-	// Clean up any existing worktree first
-	_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", g.worktreePath) // Ignore error if worktree doesn't exist
-
-	// Open the repository
-	repo, err := git.PlainOpen(g.repoPath)
-	if err != nil {
-		return fmt.Errorf("failed to open repository: %w", err)
-	}
-
-	// Clean up any existing branch or reference
-	if err := g.cleanupExistingBranch(repo); err != nil {
-		return fmt.Errorf("failed to cleanup existing branch: %w", err)
-	}
-
+	// Get HEAD commit first - this is fast and we need it anyway
 	output, err := g.runGitCommand(g.repoPath, "rev-parse", "HEAD")
 	if err != nil {
 		if strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") ||
@@ -107,14 +80,31 @@ func (g *GitWorktree) setupNewWorktree() error {
 	g.baseCommitSHA = headCommit
 
 	// Create a new worktree from the HEAD commit
-	// Otherwise, we'll inherit uncommitted changes from the previous worktree.
-	// This way, we can start the worktree with a clean slate.
-	// TODO: we might want to give an option to use main/master instead of the current branch.
+	// The -b flag creates the branch, no need for separate cleanup since branch doesn't exist
+	// (we already checked in Setup())
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, headCommit); err != nil {
+		// If it fails due to existing worktree/branch, try cleanup and retry once
+		if strings.Contains(err.Error(), "already exists") {
+			g.cleanupForRetry()
+			if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, headCommit); err != nil {
+				return fmt.Errorf("failed to create worktree from commit %s: %w", headCommit, err)
+			}
+			return nil
+		}
 		return fmt.Errorf("failed to create worktree from commit %s: %w", headCommit, err)
 	}
 
 	return nil
+}
+
+// cleanupForRetry does minimal cleanup needed to retry worktree creation
+func (g *GitWorktree) cleanupForRetry() {
+	// Remove existing worktree if present
+	_ = exec.Command("git", "-C", g.repoPath, "worktree", "remove", "-f", g.worktreePath).Run()
+	// Delete branch if it exists
+	_ = exec.Command("git", "-C", g.repoPath, "branch", "-D", g.branchName).Run()
+	// Prune stale worktrees
+	_ = exec.Command("git", "-C", g.repoPath, "worktree", "prune").Run()
 }
 
 // Cleanup removes the worktree and associated branch
@@ -132,22 +122,12 @@ func (g *GitWorktree) Cleanup() error {
 		errs = append(errs, fmt.Errorf("failed to check worktree path: %w", err))
 	}
 
-	// Open the repository for branch cleanup
-	repo, err := git.PlainOpen(g.repoPath)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("failed to open repository for cleanup: %w", err))
-		return g.combineErrors(errs)
-	}
-
-	branchRef := plumbing.NewBranchReferenceName(g.branchName)
-
-	// Check if branch exists before attempting removal
-	if _, err := repo.Reference(branchRef, false); err == nil {
-		if err := repo.Storer.RemoveReference(branchRef); err != nil {
-			errs = append(errs, fmt.Errorf("failed to remove branch %s: %w", g.branchName, err))
+	// Delete branch using native git command (faster than go-git)
+	if err := exec.Command("git", "-C", g.repoPath, "branch", "-D", g.branchName).Run(); err != nil {
+		// Ignore error if branch doesn't exist
+		if !strings.Contains(err.Error(), "not found") {
+			log.WarningLog.Printf("failed to delete branch %s: %v", g.branchName, err)
 		}
-	} else if err != plumbing.ErrReferenceNotFound {
-		errs = append(errs, fmt.Errorf("error checking branch %s existence: %w", g.branchName, err))
 	}
 
 	// Prune the worktree to clean up any remaining references

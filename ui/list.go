@@ -73,6 +73,12 @@ type List struct {
 	// map of repo name to number of instances using it. Used to display the repo name only if there are
 	// multiple repos in play.
 	repos map[string]int
+
+	// Cache for grouped instances (performance optimization)
+	cachedGroups   []repoGroup
+	cachedOrder    []*session.Instance
+	cachedIndexMap map[*session.Instance]int
+	cacheValid     bool
 }
 
 func NewList(spinner *spinner.Model, autoYes bool) *List {
@@ -82,6 +88,25 @@ func NewList(spinner *spinner.Model, autoYes bool) *List {
 		repos:    make(map[string]int),
 		autoyes:  autoYes,
 	}
+}
+
+// invalidateCache marks the grouped instances cache as stale
+func (l *List) invalidateCache() {
+	l.cacheValid = false
+}
+
+// ensureCacheValid rebuilds the cache if it's stale
+func (l *List) ensureCacheValid() {
+	if l.cacheValid {
+		return
+	}
+	l.cachedGroups = l.buildGroupedInstances()
+	l.cachedOrder = l.buildDisplayOrder(l.cachedGroups)
+	l.cachedIndexMap = make(map[*session.Instance]int, len(l.items))
+	for i, inst := range l.items {
+		l.cachedIndexMap[inst] = i
+	}
+	l.cacheValid = true
 }
 
 // SetSize sets the height and width of the list.
@@ -295,17 +320,27 @@ func (l *List) String() string {
 	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
 }
 
-// Down selects the next item in the list.
+// Down selects the next item in the list based on display order.
 func (l *List) Down() {
 	if len(l.items) == 0 {
 		return
 	}
-	if l.selectedIdx < len(l.items)-1 {
-		l.selectedIdx++
+	displayOrder := l.getDisplayOrder()
+	currentInst := l.items[l.selectedIdx]
+
+	// Find current position in display order
+	for i, inst := range displayOrder {
+		if inst == currentInst {
+			if i < len(displayOrder)-1 {
+				// Move to next in display order, update selectedIdx to point to it in l.items
+				l.selectedIdx = l.findInstanceIndex(displayOrder[i+1])
+			}
+			return
+		}
 	}
 }
 
-// Kill selects the next item in the list.
+// Kill removes the currently selected instance from the list.
 func (l *List) Kill() {
 	if len(l.items) == 0 {
 		return
@@ -317,11 +352,6 @@ func (l *List) Kill() {
 		log.ErrorLog.Printf("could not kill instance: %v", err)
 	}
 
-	// If you delete the last one in the list, select the previous one.
-	if l.selectedIdx == len(l.items)-1 {
-		defer l.Up()
-	}
-
 	// Unregister the reponame.
 	repoName, err := targetInstance.RepoName()
 	if err != nil {
@@ -330,8 +360,15 @@ func (l *List) Kill() {
 		l.rmRepo(repoName)
 	}
 
-	// Since there's items after this, the selectedIdx can stay the same.
+	// Remove the item from the list.
 	l.items = append(l.items[:l.selectedIdx], l.items[l.selectedIdx+1:]...)
+
+	// Adjust selectedIdx if we deleted the last item.
+	if l.selectedIdx >= len(l.items) && l.selectedIdx > 0 {
+		l.selectedIdx = len(l.items) - 1
+	}
+
+	l.invalidateCache()
 }
 
 func (l *List) Attach() (chan struct{}, error) {
@@ -339,13 +376,23 @@ func (l *List) Attach() (chan struct{}, error) {
 	return targetInstance.Attach()
 }
 
-// Up selects the prev item in the list.
+// Up selects the prev item in the list based on display order.
 func (l *List) Up() {
 	if len(l.items) == 0 {
 		return
 	}
-	if l.selectedIdx > 0 {
-		l.selectedIdx--
+	displayOrder := l.getDisplayOrder()
+	currentInst := l.items[l.selectedIdx]
+
+	// Find current position in display order
+	for i, inst := range displayOrder {
+		if inst == currentInst {
+			if i > 0 {
+				// Move to prev in display order, update selectedIdx to point to it in l.items
+				l.selectedIdx = l.findInstanceIndex(displayOrder[i-1])
+			}
+			return
+		}
 	}
 }
 
@@ -372,6 +419,7 @@ func (l *List) rmRepo(repo string) {
 // When creating a new one and entering the name, you want to call the finalizer once the name is done.
 func (l *List) AddInstance(instance *session.Instance) (finalize func()) {
 	l.items = append(l.items, instance)
+	l.invalidateCache()
 	// The finalizer registers the repo name once the instance is started.
 	return func() {
 		repoName, err := instance.RepoName()
@@ -381,6 +429,7 @@ func (l *List) AddInstance(instance *session.Instance) (finalize func()) {
 		}
 
 		l.addRepo(repoName)
+		l.invalidateCache() // Repo name now known, rebuild groups
 	}
 }
 
@@ -405,9 +454,15 @@ func (l *List) GetInstances() []*session.Instance {
 	return l.items
 }
 
-// getGroupedInstances returns instances grouped by repo, sorted alphabetically by repo name,
-// with instances sorted by creation time (oldest first) within each group.
+// getGroupedInstances returns cached instances grouped by repo.
+// Use invalidateCache() when the list changes.
 func (l *List) getGroupedInstances() []repoGroup {
+	l.ensureCacheValid()
+	return l.cachedGroups
+}
+
+// buildGroupedInstances builds the grouped instances (internal, no caching).
+func (l *List) buildGroupedInstances() []repoGroup {
 	// Build map of repo name -> instances
 	repoMap := make(map[string][]*session.Instance)
 	for _, inst := range l.items {
@@ -448,6 +503,21 @@ func (l *List) getGroupedInstances() []repoGroup {
 	return groups
 }
 
+// getDisplayOrder returns cached instances in display order.
+func (l *List) getDisplayOrder() []*session.Instance {
+	l.ensureCacheValid()
+	return l.cachedOrder
+}
+
+// buildDisplayOrder builds the display order from groups (internal, no caching).
+func (l *List) buildDisplayOrder(groups []repoGroup) []*session.Instance {
+	result := make([]*session.Instance, 0, len(l.items))
+	for _, group := range groups {
+		result = append(result, group.instances...)
+	}
+	return result
+}
+
 // renderGroupHeader renders a visual separator header for a repository group
 func (l *List) renderGroupHeader(repoName string) string {
 	// Calculate available width for the header line
@@ -475,12 +545,12 @@ func (l *List) renderGroupHeader(repoName string) string {
 	return groupHeaderStyle.Render(header)
 }
 
-// findInstanceIndex returns the index of an instance in l.items, or -1 if not found
+// findInstanceIndex returns the index of an instance in l.items, or -1 if not found.
+// Uses O(1) map lookup from cache.
 func (l *List) findInstanceIndex(target *session.Instance) int {
-	for i, inst := range l.items {
-		if inst == target {
-			return i
-		}
+	l.ensureCacheValid()
+	if idx, ok := l.cachedIndexMap[target]; ok {
+		return idx
 	}
 	return -1
 }

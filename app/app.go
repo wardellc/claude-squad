@@ -16,7 +16,6 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
 )
 
 const GlobalInstanceLimit = 10
@@ -36,12 +35,8 @@ type state int
 
 const (
 	stateDefault state = iota
-	// stateRepoSelect is the state when the user is selecting a repository.
-	stateRepoSelect
-	// stateNew is the state when the user is creating a new instance.
-	stateNew
-	// statePrompt is the state when the user is entering a prompt.
-	statePrompt
+	// stateNewForm is the state when the new instance form is displayed.
+	stateNewForm
 	// stateHelp is the state when a help screen is displayed.
 	stateHelp
 	// stateConfirm is the state when a confirmation modal is displayed.
@@ -67,12 +62,9 @@ type home struct {
 
 	// state is the current discrete state of the application
 	state state
-	// newInstanceFinalizer is called when the state is stateNew and then you press enter.
+	// newInstanceFinalizer is called when an instance is created.
 	// It registers the new instance in the list after the instance has been started.
 	newInstanceFinalizer func()
-
-	// promptAfterName tracks if we should enter prompt mode after naming
-	promptAfterName bool
 
 	// keySent is used to manage underlining menu items
 	keySent bool
@@ -89,14 +81,12 @@ type home struct {
 	errBox *ui.ErrBox
 	// global spinner instance. we plumb this down to where it's needed
 	spinner spinner.Model
-	// textInputOverlay handles text input with state
-	textInputOverlay *overlay.TextInputOverlay
 	// textOverlay displays text information
 	textOverlay *overlay.TextOverlay
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
-	// repoSelectorOverlay handles repository selection
-	repoSelectorOverlay *overlay.RepoSelectorOverlay
+	// instanceFormOverlay handles the unified new instance form
+	instanceFormOverlay *overlay.InstanceFormOverlay
 
 	// -- Multi-repository support --
 
@@ -170,11 +160,11 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	m.tabbedWindow.SetSize(tabsWidth, contentHeight)
 	m.list.SetSize(listWidth, contentHeight)
 
-	if m.textInputOverlay != nil {
-		m.textInputOverlay.SetSize(int(float32(msg.Width)*0.6), int(float32(msg.Height)*0.4))
-	}
 	if m.textOverlay != nil {
 		m.textOverlay.SetWidth(int(float32(msg.Width) * 0.6))
+	}
+	if m.instanceFormOverlay != nil {
+		m.instanceFormOverlay.SetSize(int(float32(msg.Width)*0.5), int(float32(msg.Height)*0.6))
 	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
@@ -202,6 +192,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
+		// Refresh preview cache for the selected instance (the blocking tmux capture)
+		if selected := m.list.GetSelectedInstance(); selected != nil {
+			if err := selected.RefreshPreview(); err != nil {
+				log.WarningLog.Printf("failed to refresh preview: %v", err)
+			}
+		}
 		cmd := m.instanceChanged()
 		return m, tea.Batch(
 			cmd,
@@ -307,7 +303,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == statePrompt || m.state == stateHelp || m.state == stateConfirm {
+	if m.state == stateHelp || m.state == stateConfirm || m.state == stateNewForm {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -323,11 +319,6 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	// Skip the menu highlighting if the key is not in the map or we are using the shift up and down keys.
-	// TODO: cleanup: when you press enter on stateNew, we use keys.KeySubmitName. We should unify the keymap.
-	if name == keys.KeyEnter && m.state == stateNew {
-		name = keys.KeySubmitName
-	}
 	m.keySent = true
 	return tea.Batch(
 		func() tea.Msg { return msg },
@@ -344,161 +335,24 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleHelpState(msg)
 	}
 
-	// Handle repository selection state
-	if m.state == stateRepoSelect {
-		shouldClose := m.repoSelectorOverlay.HandleKeyPress(msg)
+	// Handle new instance form state
+	if m.state == stateNewForm {
+		shouldClose := m.instanceFormOverlay.HandleKeyPress(msg)
 		if shouldClose {
-			if m.repoSelectorOverlay.IsSubmitted() {
-				selectedRepo := m.repoSelectorOverlay.GetSelectedRepo()
-				m.repoSelectorOverlay = nil
-				return m.createNewInstance(selectedRepo.Path)
+			if m.instanceFormOverlay.IsSubmitted() {
+				name := m.instanceFormOverlay.GetName()
+				repo := m.instanceFormOverlay.GetSelectedRepo()
+				prompt := m.instanceFormOverlay.GetPrompt()
+
+				m.instanceFormOverlay = nil
+				return m.createInstanceFromForm(name, repo.Path, prompt)
 			}
 			// Canceled
-			m.repoSelectorOverlay = nil
+			m.instanceFormOverlay = nil
 			m.state = stateDefault
-			m.promptAfterName = false
+			m.menu.SetState(ui.StateDefault)
 			return m, nil
 		}
-		return m, nil
-	}
-
-	if m.state == stateNew {
-		// Handle quit commands first. Don't handle q because the user might want to type that.
-		if msg.String() == "ctrl+c" {
-			m.state = stateDefault
-			m.promptAfterName = false
-			m.list.Kill()
-			return m, tea.Sequence(
-				tea.WindowSize(),
-				func() tea.Msg {
-					m.menu.SetState(ui.StateDefault)
-					return nil
-				},
-			)
-		}
-
-		instance := m.list.GetInstances()[m.list.NumInstances()-1]
-		switch msg.Type {
-		// Start the instance (enable previews etc) and go back to the main menu state.
-		case tea.KeyEnter:
-			if len(instance.Title) == 0 {
-				return m, m.handleError(fmt.Errorf("title cannot be empty"))
-			}
-
-			// If user pressed 'N' (prompt after name), collect prompt BEFORE creating worktree
-			if m.promptAfterName {
-				m.state = statePrompt
-				m.menu.SetState(ui.StatePrompt)
-				m.textInputOverlay = overlay.NewTextInputOverlay("Enter prompt", "")
-				m.promptAfterName = false
-				return m, tea.WindowSize()
-			}
-
-			// Set InternalName for uniqueness: "{repoName}_{title}"
-			repoName := filepath.Base(m.selectedRepoPath)
-			instance.InternalName = fmt.Sprintf("%s_%s", repoName, instance.Title)
-
-			// 'n' key path: no prompt needed, start immediately
-			if err := instance.Start(true); err != nil {
-				m.list.Kill()
-				m.state = stateDefault
-				return m, m.handleError(err)
-			}
-			// Save after adding new instance
-			if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
-				return m, m.handleError(err)
-			}
-			// Instance added successfully, call the finalizer.
-			m.newInstanceFinalizer()
-			if m.autoYes {
-				instance.AutoYes = true
-			}
-
-			m.newInstanceFinalizer()
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
-			m.showHelpScreen(helpStart(instance), nil)
-
-			return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
-		case tea.KeyRunes:
-			if runewidth.StringWidth(instance.Title) >= 32 {
-				return m, m.handleError(fmt.Errorf("title cannot be longer than 32 characters"))
-			}
-			if err := instance.SetTitle(instance.Title + string(msg.Runes)); err != nil {
-				return m, m.handleError(err)
-			}
-		case tea.KeyBackspace:
-			runes := []rune(instance.Title)
-			if len(runes) == 0 {
-				return m, nil
-			}
-			if err := instance.SetTitle(string(runes[:len(runes)-1])); err != nil {
-				return m, m.handleError(err)
-			}
-		case tea.KeySpace:
-			if err := instance.SetTitle(instance.Title + " "); err != nil {
-				return m, m.handleError(err)
-			}
-		case tea.KeyEsc:
-			m.list.Kill()
-			m.state = stateDefault
-			m.instanceChanged()
-
-			return m, tea.Sequence(
-				tea.WindowSize(),
-				func() tea.Msg {
-					m.menu.SetState(ui.StateDefault)
-					return nil
-				},
-			)
-		default:
-		}
-		return m, nil
-	} else if m.state == statePrompt {
-		// Use the new TextInputOverlay component to handle all key events
-		shouldClose := m.textInputOverlay.HandleKeyPress(msg)
-
-		// Check if the form was submitted or canceled
-		if shouldClose {
-			selected := m.list.GetSelectedInstance()
-			// TODO: this should never happen since we set the instance in the previous state.
-			if selected == nil {
-				return m, nil
-			}
-
-			wasCanceled := m.textInputOverlay.IsCanceled()
-			prompt := m.textInputOverlay.GetValue()
-
-			// Close overlay and reset state immediately for responsive UI
-			m.textInputOverlay = nil
-			m.state = stateDefault
-			m.menu.SetState(ui.StateDefault)
-
-			if wasCanceled {
-				// User pressed ESC - instance not started yet, remove from list
-				m.list.Kill()
-				return m, tea.WindowSize()
-			}
-
-			// Store prompt on instance - will be sent after Start()
-			selected.Prompt = prompt
-
-			// Set InternalName for uniqueness: "{repoName}_{title}"
-			repoName := filepath.Base(m.selectedRepoPath)
-			selected.InternalName = fmt.Sprintf("%s_%s", repoName, selected.Title)
-
-			// Set status to Loading while worktree is being created
-			selected.SetStatus(session.Loading)
-
-			// Start the instance asynchronously
-			startCmd := func() tea.Msg {
-				err := selected.Start(true)
-				return instanceStartedMsg{instance: selected, err: err}
-			}
-
-			return m, tea.Batch(tea.WindowSize(), startCmd)
-		}
-
 		return m, nil
 	}
 
@@ -542,36 +396,25 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	switch name {
 	case keys.KeyHelp:
 		return m.showHelpScreen(helpTypeGeneral{}, nil)
-	case keys.KeyPrompt:
+	case keys.KeyPrompt, keys.KeyNew:
 		if m.list.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		m.promptAfterName = true
-		// If repos are configured, show repo selector first
+
+		// Get the default repo (most recently used or first available)
+		var defaultRepo config.RepoInfo
+		var repos []config.RepoInfo
 		if len(m.repos) > 0 {
-			sortedRepos := m.appConfig.GetReposSortedByUsage(m.repos)
-			m.repoSelectorOverlay = overlay.NewRepoSelectorOverlay(sortedRepos)
-			m.state = stateRepoSelect
-			return m, nil
+			repos = m.appConfig.GetReposSortedByUsage(m.repos)
+			defaultRepo = m.appConfig.GetMostRecentRepo(repos)
 		}
-		// No repos configured, use current directory
-		return m.createNewInstance(".")
-	case keys.KeyNew:
-		if m.list.NumInstances() >= GlobalInstanceLimit {
-			return m, m.handleError(
-				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
-		}
-		m.promptAfterName = false
-		// If repos are configured, show repo selector first
-		if len(m.repos) > 0 {
-			sortedRepos := m.appConfig.GetReposSortedByUsage(m.repos)
-			m.repoSelectorOverlay = overlay.NewRepoSelectorOverlay(sortedRepos)
-			m.state = stateRepoSelect
-			return m, nil
-		}
-		// No repos configured, use current directory
-		return m.createNewInstance(".")
+
+		// Show the new instance form
+		m.instanceFormOverlay = overlay.NewInstanceFormOverlay(repos, defaultRepo)
+		m.state = stateNewForm
+		m.menu.SetState(ui.StateNewInstance)
+		return m, tea.WindowSize()
 	case keys.KeyUp:
 		m.list.Up()
 		return m, m.instanceChanged()
@@ -765,10 +608,15 @@ func (m *home) handleError(err error) tea.Cmd {
 	}
 }
 
-// createNewInstance creates a new instance with the given repo path
-func (m *home) createNewInstance(repoPath string) (tea.Model, tea.Cmd) {
+// createInstanceFromForm creates a new instance from the form values
+func (m *home) createInstanceFromForm(name, repoPath, prompt string) (tea.Model, tea.Cmd) {
+	// Use current directory if no repo path
+	if repoPath == "" {
+		repoPath = "."
+	}
+
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   "",
+		Title:   name,
 		Path:    repoPath,
 		Program: m.program,
 	})
@@ -777,12 +625,35 @@ func (m *home) createNewInstance(repoPath string) (tea.Model, tea.Cmd) {
 	}
 
 	m.selectedRepoPath = repoPath
+	instance.Prompt = prompt
+
+	// Set InternalName for uniqueness: "{repoName}_{title}"
+	repoName := filepath.Base(repoPath)
+	instance.InternalName = fmt.Sprintf("%s_%s", repoName, name)
+
 	m.newInstanceFinalizer = m.list.AddInstance(instance)
 	m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-	m.state = stateNew
-	m.menu.SetState(ui.StateNewInstance)
 
-	return m, nil
+	// Set status to Loading while worktree is being created
+	instance.SetStatus(session.Loading)
+
+	// Update last used repo
+	if repoPath != "" && repoPath != "." {
+		if err := m.appConfig.SetLastUsedRepo(repoPath); err != nil {
+			log.WarningLog.Printf("failed to set last used repo: %v", err)
+		}
+	}
+
+	m.state = stateDefault
+	m.menu.SetState(ui.StateDefault)
+
+	// Start the instance asynchronously
+	startCmd := func() tea.Msg {
+		err := instance.Start(true)
+		return instanceStartedMsg{instance: instance, err: err}
+	}
+
+	return m, tea.Batch(tea.WindowSize(), startCmd)
 }
 
 // confirmAction shows a confirmation modal and stores the action to execute on confirm
@@ -822,16 +693,11 @@ func (m *home) View() string {
 		m.errBox.String(),
 	)
 
-	if m.state == stateRepoSelect {
-		if m.repoSelectorOverlay == nil {
-			log.ErrorLog.Printf("repo selector overlay is nil")
+	if m.state == stateNewForm {
+		if m.instanceFormOverlay == nil {
+			log.ErrorLog.Printf("instance form overlay is nil")
 		}
-		return overlay.PlaceOverlay(0, 0, m.repoSelectorOverlay.Render(), mainView, true, true)
-	} else if m.state == statePrompt {
-		if m.textInputOverlay == nil {
-			log.ErrorLog.Printf("text input overlay is nil")
-		}
-		return overlay.PlaceOverlay(0, 0, m.textInputOverlay.Render(), mainView, true, true)
+		return overlay.PlaceOverlay(0, 0, m.instanceFormOverlay.Render(), mainView, true, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")

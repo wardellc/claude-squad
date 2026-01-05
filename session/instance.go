@@ -65,6 +65,10 @@ type Instance struct {
 	tmuxSession *tmux.TmuxSession
 	// gitWorktree is the git worktree for the instance.
 	gitWorktree *git.GitWorktree
+
+	// Cached fields for performance (avoid repeated I/O on render)
+	cachedRepoName string // Cached repo name
+	cachedPreview  string // Cached tmux pane content
 }
 
 // ToInstanceData converts an Instance to its serializable form
@@ -189,7 +193,10 @@ func (i *Instance) RepoName() (string, error) {
 	if !i.started {
 		return "", fmt.Errorf("cannot get repo name for instance that has not been started")
 	}
-	return i.gitWorktree.GetRepoName(), nil
+	if i.cachedRepoName == "" {
+		i.cachedRepoName = i.gitWorktree.GetRepoName()
+	}
+	return i.cachedRepoName, nil
 }
 
 func (i *Instance) SetStatus(status Status) {
@@ -327,11 +334,27 @@ func (i *Instance) combineErrors(errs []error) error {
 	return fmt.Errorf("%s", errMsg)
 }
 
+// Preview returns cached tmux pane content instantly (non-blocking).
+// Use RefreshPreview() to update the cache.
 func (i *Instance) Preview() (string, error) {
 	if !i.started || i.Status == Paused {
 		return "", nil
 	}
-	return i.tmuxSession.CapturePaneContent()
+	return i.cachedPreview, nil
+}
+
+// RefreshPreview updates the cached preview content by capturing tmux pane.
+// This is the blocking operation that should be called from a ticker, not on key press.
+func (i *Instance) RefreshPreview() error {
+	if !i.started || i.Status == Paused {
+		return nil
+	}
+	content, err := i.tmuxSession.CapturePaneContent()
+	if err != nil {
+		return err
+	}
+	i.cachedPreview = content
+	return nil
 }
 
 func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {

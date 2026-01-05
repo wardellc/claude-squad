@@ -18,11 +18,12 @@ import (
 )
 
 var (
-	version     = "1.0.14"
-	programFlag string
-	autoYesFlag bool
-	daemonFlag  bool
-	rootCmd     = &cobra.Command{
+	version      = "1.0.14"
+	programFlag  string
+	autoYesFlag  bool
+	daemonFlag   bool
+	reposDirFlag string
+	rootCmd      = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,17 +38,48 @@ var (
 				return err
 			}
 
-			// Check if we're in a git repository
-			currentDir, err := filepath.Abs(".")
-			if err != nil {
-				return fmt.Errorf("failed to get current directory: %w", err)
-			}
-
-			if !git.IsGitRepo(currentDir) {
-				return fmt.Errorf("error: claude-squad must be run from within a git repository")
-			}
-
 			cfg := config.LoadConfig()
+
+			// Build the list of repositories
+			var repos []config.RepoInfo
+
+			// If --repos-dir is specified, discover repos in that directory
+			if reposDirFlag != "" {
+				discovered, err := config.DiscoverRepos(reposDirFlag)
+				if err != nil {
+					return fmt.Errorf("failed to discover repos in %s: %w", reposDirFlag, err)
+				}
+				repos = append(repos, discovered...)
+			}
+
+			// Add repos from config file
+			for _, repoPath := range cfg.Repos {
+				// Check if repo exists and is a git repo
+				if config.IsGitRepo(repoPath) {
+					repos = append(repos, config.RepoInfo{
+						Name: config.GetRepoName(repoPath),
+						Path: repoPath,
+					})
+				}
+			}
+
+			// If no repos configured, check if we're in a git repository (original behavior)
+			if len(repos) == 0 {
+				currentDir, err := filepath.Abs(".")
+				if err != nil {
+					return fmt.Errorf("failed to get current directory: %w", err)
+				}
+
+				if !git.IsGitRepo(currentDir) {
+					return fmt.Errorf("error: claude-squad must be run from within a git repository, or use --repos-dir to specify a directory containing repos")
+				}
+
+				// Add current directory as the only repo
+				repos = append(repos, config.RepoInfo{
+					Name: config.GetRepoName(currentDir),
+					Path: currentDir,
+				})
+			}
 
 			// Program flag overrides config
 			program := cfg.DefaultProgram
@@ -71,7 +103,7 @@ var (
 				log.ErrorLog.Printf("failed to stop daemon: %v", err)
 			}
 
-			return app.Run(ctx, program, autoYes)
+			return app.Run(ctx, program, autoYes, repos)
 		},
 	}
 
@@ -148,6 +180,8 @@ func init() {
 		"Program to run in new instances (e.g. 'aider --model ollama_chat/gemma3:1b')")
 	rootCmd.Flags().BoolVarP(&autoYesFlag, "autoyes", "y", false,
 		"[experimental] If enabled, all instances will automatically accept prompts")
+	rootCmd.Flags().StringVarP(&reposDirFlag, "repos-dir", "r", "",
+		"Directory containing git repositories to manage")
 	rootCmd.Flags().BoolVar(&daemonFlag, "daemon", false, "Run a program that loads all sessions"+
 		" and runs autoyes mode on them.")
 

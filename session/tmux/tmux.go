@@ -149,45 +149,77 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("error restoring tmux session: %w", err)
 	}
 
-	if strings.HasSuffix(t.program, ProgramClaude) || strings.HasSuffix(t.program, ProgramAider) || strings.HasSuffix(t.program, ProgramGemini) {
-		searchString := "Do you trust the files in this folder?"
-		tapFunc := t.TapEnter
-		maxWaitTime := 30 * time.Second // Much longer timeout for slower systems
-		if !strings.HasSuffix(t.program, ProgramClaude) {
-			searchString = "Open documentation url for more info"
-			tapFunc = t.TapDAndEnter
-			maxWaitTime = 45 * time.Second // Aider/Gemini take longer to start
-		}
+	return nil
+}
 
-		// Deal with "do you trust the files" screen by sending an enter keystroke.
-		// Use exponential backoff with longer timeout for reliability on slow systems
-		startTime := time.Now()
-		sleepDuration := 100 * time.Millisecond
-		attempt := 0
+// handleTrustScreen handles the "Do you trust the files" screen for Claude/Aider/Gemini.
+// This polls for the trust dialog and auto-accepts it, or returns early if Claude is ready.
+func (t *TmuxSession) handleTrustScreen() {
+	if !strings.HasSuffix(t.program, ProgramClaude) && !strings.HasSuffix(t.program, ProgramAider) && !strings.HasSuffix(t.program, ProgramGemini) {
+		return
+	}
 
-		for time.Since(startTime) < maxWaitTime {
-			attempt++
-			time.Sleep(sleepDuration)
-			content, err := t.CapturePaneContent()
-			if err != nil {
-				// Session might not be ready yet, continue waiting
-			} else {
-				if strings.Contains(content, searchString) {
-					if err := tapFunc(); err != nil {
-						log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
-					}
-					break
-				}
-			}
-
-			// Exponential backoff with cap at 1 second
-			sleepDuration = time.Duration(float64(sleepDuration) * 1.2)
-			if sleepDuration > time.Second {
-				sleepDuration = time.Second
-			}
+	searchString := "Do you trust the files in this folder?"
+	tapFunc := t.TapEnter
+	maxWaitTime := 30 * time.Second // Much longer timeout for slower systems
+	// Indicators that Claude is ready for input (already trusted or trust screen passed)
+	readyIndicators := []string{
+		"What would you like to do?", // Claude's initial prompt
+		">",                          // Claude's input prompt
+	}
+	if !strings.HasSuffix(t.program, ProgramClaude) {
+		searchString = "Open documentation url for more info"
+		tapFunc = t.TapDAndEnter
+		maxWaitTime = 45 * time.Second // Aider/Gemini take longer to start
+		readyIndicators = []string{
+			"aider>", // Aider's prompt
+			">>>",    // Gemini's prompt
 		}
 	}
-	return nil
+
+	// Deal with "do you trust the files" screen by sending an enter keystroke.
+	// Use exponential backoff with longer timeout for reliability on slow systems
+	startTime := time.Now()
+	sleepDuration := 100 * time.Millisecond
+
+	for time.Since(startTime) < maxWaitTime {
+		time.Sleep(sleepDuration)
+		content, err := t.CapturePaneContent()
+		if err != nil {
+			// Session might not be ready yet, continue waiting
+		} else {
+			// Check for trust screen
+			if strings.Contains(content, searchString) {
+				if err := tapFunc(); err != nil {
+					log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
+				}
+				return
+			}
+			// Check if Claude is already ready for input (trust already established)
+			for _, indicator := range readyIndicators {
+				if strings.Contains(content, indicator) {
+					return // Claude is ready, no need to wait
+				}
+			}
+		}
+
+		// Exponential backoff with cap at 1 second
+		sleepDuration = time.Duration(float64(sleepDuration) * 1.2)
+		if sleepDuration > time.Second {
+			sleepDuration = time.Second
+		}
+	}
+}
+
+// HandleTrustScreenAsync handles the "Do you trust" screen in the background.
+// Returns a channel that closes when trust screen is handled or times out.
+func (t *TmuxSession) HandleTrustScreenAsync() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t.handleTrustScreen()
+	}()
+	return done
 }
 
 // Restore attaches to an existing session and restores the window size
