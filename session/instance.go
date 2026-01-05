@@ -29,8 +29,11 @@ const (
 
 // Instance is a running instance of claude code.
 type Instance struct {
-	// Title is the title of the instance.
+	// Title is the display name of the instance (user-provided).
 	Title string
+	// InternalName is the unique identifier combining repo and title: "{repoName}_{title}"
+	// This allows same display name across different repos.
+	InternalName string
 	// Path is the path to the workspace.
 	Path string
 	// Branch is the branch of the instance.
@@ -67,16 +70,17 @@ type Instance struct {
 // ToInstanceData converts an Instance to its serializable form
 func (i *Instance) ToInstanceData() InstanceData {
 	data := InstanceData{
-		Title:     i.Title,
-		Path:      i.Path,
-		Branch:    i.Branch,
-		Status:    i.Status,
-		Height:    i.Height,
-		Width:     i.Width,
-		CreatedAt: i.CreatedAt,
-		UpdatedAt: time.Now(),
-		Program:   i.Program,
-		AutoYes:   i.AutoYes,
+		Title:        i.Title,
+		InternalName: i.InternalName,
+		Path:         i.Path,
+		Branch:       i.Branch,
+		Status:       i.Status,
+		Height:       i.Height,
+		Width:        i.Width,
+		CreatedAt:    i.CreatedAt,
+		UpdatedAt:    time.Now(),
+		Program:      i.Program,
+		AutoYes:      i.AutoYes,
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -104,16 +108,23 @@ func (i *Instance) ToInstanceData() InstanceData {
 
 // FromInstanceData creates a new Instance from serialized data
 func FromInstanceData(data InstanceData) (*Instance, error) {
+	// Backward compatibility: if InternalName is empty, use Title
+	internalName := data.InternalName
+	if internalName == "" {
+		internalName = data.Title
+	}
+
 	instance := &Instance{
-		Title:     data.Title,
-		Path:      data.Path,
-		Branch:    data.Branch,
-		Status:    data.Status,
-		Height:    data.Height,
-		Width:     data.Width,
-		CreatedAt: data.CreatedAt,
-		UpdatedAt: data.UpdatedAt,
-		Program:   data.Program,
+		Title:        data.Title,
+		InternalName: internalName,
+		Path:         data.Path,
+		Branch:       data.Branch,
+		Status:       data.Status,
+		Height:       data.Height,
+		Width:        data.Width,
+		CreatedAt:    data.CreatedAt,
+		UpdatedAt:    data.UpdatedAt,
+		Program:      data.Program,
 		gitWorktree: git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -130,7 +141,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 
 	if instance.Paused() {
 		instance.started = true
-		instance.tmuxSession = tmux.NewTmuxSession(instance.Title, instance.Program)
+		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program)
 	} else {
 		if err := instance.Start(false); err != nil {
 			return nil, err
@@ -196,8 +207,8 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		// Use existing tmux session (useful for testing)
 		tmuxSession = i.tmuxSession
 	} else {
-		// Create new tmux session
-		tmuxSession = tmux.NewTmuxSession(i.Title, i.Program)
+		// Create new tmux session using InternalName for uniqueness
+		tmuxSession = tmux.NewTmuxSession(i.InternalName, i.Program)
 	}
 	i.tmuxSession = tmuxSession
 
@@ -244,27 +255,32 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
 			return setupErr
 		}
+
+		// Handle trust screen asynchronously (don't block startup)
+		trustDone := i.tmuxSession.HandleTrustScreenAsync()
+
+		// If there's a prompt to send, do it in background after trust screen
+		if i.Prompt != "" {
+			prompt := i.Prompt
+			i.Prompt = "" // Clear immediately
+			go func() {
+				<-trustDone // Wait for trust screen to be handled
+				// Brief delay to ensure the program is ready for input
+				time.Sleep(500 * time.Millisecond)
+				if err := i.tmuxSession.SendKeys(prompt); err != nil {
+					log.ErrorLog.Printf("failed to send initial prompt: %v", err)
+					return
+				}
+				// Brief pause to prevent carriage return from being interpreted as newline
+				time.Sleep(100 * time.Millisecond)
+				if err := i.tmuxSession.TapEnter(); err != nil {
+					log.ErrorLog.Printf("failed to tap enter after initial prompt: %v", err)
+				}
+			}()
+		}
 	}
 
 	i.SetStatus(Running)
-
-	// Send initial prompt if one was provided
-	if i.Prompt != "" {
-		// Brief delay to ensure the program is ready for input
-		time.Sleep(500 * time.Millisecond)
-		// Send keys directly to tmux (can't use SendPrompt as i.started isn't set yet)
-		if err := i.tmuxSession.SendKeys(i.Prompt); err != nil {
-			log.ErrorLog.Printf("failed to send initial prompt: %v", err)
-		} else {
-			// Brief pause to prevent carriage return from being interpreted as newline
-			time.Sleep(100 * time.Millisecond)
-			if err := i.tmuxSession.TapEnter(); err != nil {
-				log.ErrorLog.Printf("failed to tap enter after initial prompt: %v", err)
-			}
-		}
-		i.Prompt = "" // Clear after sending
-	}
-
 	return nil
 }
 
@@ -479,6 +495,8 @@ func (i *Instance) Resume() error {
 				}
 				return fmt.Errorf("failed to start new session: %w", err)
 			}
+			// Handle trust screen asynchronously for new session
+			_ = i.tmuxSession.HandleTrustScreenAsync()
 		}
 	} else {
 		// Create new tmux session
@@ -491,6 +509,8 @@ func (i *Instance) Resume() error {
 			}
 			return fmt.Errorf("failed to start new session: %w", err)
 		}
+		// Handle trust screen asynchronously
+		_ = i.tmuxSession.HandleTrustScreenAsync()
 	}
 
 	i.SetStatus(Running)

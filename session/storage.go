@@ -9,15 +9,16 @@ import (
 
 // InstanceData represents the serializable data of an Instance
 type InstanceData struct {
-	Title     string    `json:"title"`
-	Path      string    `json:"path"`
-	Branch    string    `json:"branch"`
-	Status    Status    `json:"status"`
-	Height    int       `json:"height"`
-	Width     int       `json:"width"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	AutoYes   bool      `json:"auto_yes"`
+	Title        string    `json:"title"`
+	InternalName string    `json:"internal_name,omitempty"`
+	Path         string    `json:"path"`
+	Branch       string    `json:"branch"`
+	Status       Status    `json:"status"`
+	Height       int       `json:"height"`
+	Width        int       `json:"width"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	AutoYes      bool      `json:"auto_yes"`
 
 	Program   string          `json:"program"`
 	Worktree  GitWorktreeData `json:"worktree"`
@@ -92,8 +93,8 @@ func (s *Storage) LoadInstances() ([]*Instance, error) {
 	return instances, nil
 }
 
-// DeleteInstance removes an instance from storage
-func (s *Storage) DeleteInstance(title string) error {
+// DeleteInstance removes an instance from storage by InternalName
+func (s *Storage) DeleteInstance(internalName string) error {
 	instances, err := s.LoadInstances()
 	if err != nil {
 		return fmt.Errorf("failed to load instances: %w", err)
@@ -102,8 +103,7 @@ func (s *Storage) DeleteInstance(title string) error {
 	found := false
 	newInstances := make([]*Instance, 0)
 	for _, instance := range instances {
-		data := instance.ToInstanceData()
-		if data.Title != title {
+		if instance.InternalName != internalName {
 			newInstances = append(newInstances, instance)
 		} else {
 			found = true
@@ -111,24 +111,22 @@ func (s *Storage) DeleteInstance(title string) error {
 	}
 
 	if !found {
-		return fmt.Errorf("instance not found: %s", title)
+		return fmt.Errorf("instance not found: %s", internalName)
 	}
 
 	return s.SaveInstances(newInstances)
 }
 
-// UpdateInstance updates an existing instance in storage
+// UpdateInstance updates an existing instance in storage by InternalName
 func (s *Storage) UpdateInstance(instance *Instance) error {
 	instances, err := s.LoadInstances()
 	if err != nil {
 		return fmt.Errorf("failed to load instances: %w", err)
 	}
 
-	data := instance.ToInstanceData()
 	found := false
 	for i, existing := range instances {
-		existingData := existing.ToInstanceData()
-		if existingData.Title == data.Title {
+		if existing.InternalName == instance.InternalName {
 			instances[i] = instance
 			found = true
 			break
@@ -136,7 +134,7 @@ func (s *Storage) UpdateInstance(instance *Instance) error {
 	}
 
 	if !found {
-		return fmt.Errorf("instance not found: %s", data.Title)
+		return fmt.Errorf("instance not found: %s", instance.InternalName)
 	}
 
 	return s.SaveInstances(instances)

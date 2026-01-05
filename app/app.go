@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -21,9 +22,9 @@ import (
 const GlobalInstanceLimit = 10
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool) error {
+func Run(ctx context.Context, program string, autoYes bool, repos []config.RepoInfo) error {
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes),
+		newHome(ctx, program, autoYes, repos),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
@@ -35,6 +36,8 @@ type state int
 
 const (
 	stateDefault state = iota
+	// stateRepoSelect is the state when the user is selecting a repository.
+	stateRepoSelect
 	// stateNew is the state when the user is creating a new instance.
 	stateNew
 	// statePrompt is the state when the user is entering a prompt.
@@ -92,9 +95,18 @@ type home struct {
 	textOverlay *overlay.TextOverlay
 	// confirmationOverlay displays confirmation modals
 	confirmationOverlay *overlay.ConfirmationOverlay
+	// repoSelectorOverlay handles repository selection
+	repoSelectorOverlay *overlay.RepoSelectorOverlay
+
+	// -- Multi-repository support --
+
+	// repos is the list of available repositories
+	repos []config.RepoInfo
+	// selectedRepoPath is the path of the currently selected repo for new instances
+	selectedRepoPath string
 }
 
-func newHome(ctx context.Context, program string, autoYes bool) *home {
+func newHome(ctx context.Context, program string, autoYes bool, repos []config.RepoInfo) *home {
 	// Load application config
 	appConfig := config.LoadConfig()
 
@@ -120,6 +132,7 @@ func newHome(ctx context.Context, program string, autoYes bool) *home {
 		autoYes:      autoYes,
 		state:        stateDefault,
 		appState:     appState,
+		repos:        repos,
 	}
 	h.list = ui.NewList(&h.spinner, autoYes)
 
@@ -209,6 +222,13 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Instance started successfully - save and update UI
 		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
 			return m, m.handleError(err)
+		}
+		// Increment repo usage count for sorting
+		if m.selectedRepoPath != "" {
+			if err := m.appConfig.IncrementRepoUsage(m.selectedRepoPath); err != nil {
+				log.WarningLog.Printf("failed to increment repo usage: %v", err)
+			}
+			m.selectedRepoPath = "" // Clear after use
 		}
 		m.newInstanceFinalizer()
 		if m.autoYes {
@@ -324,6 +344,24 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleHelpState(msg)
 	}
 
+	// Handle repository selection state
+	if m.state == stateRepoSelect {
+		shouldClose := m.repoSelectorOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.repoSelectorOverlay.IsSubmitted() {
+				selectedRepo := m.repoSelectorOverlay.GetSelectedRepo()
+				m.repoSelectorOverlay = nil
+				return m.createNewInstance(selectedRepo.Path)
+			}
+			// Canceled
+			m.repoSelectorOverlay = nil
+			m.state = stateDefault
+			m.promptAfterName = false
+			return m, nil
+		}
+		return m, nil
+	}
+
 	if m.state == stateNew {
 		// Handle quit commands first. Don't handle q because the user might want to type that.
 		if msg.String() == "ctrl+c" {
@@ -355,6 +393,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				m.promptAfterName = false
 				return m, tea.WindowSize()
 			}
+
+			// Set InternalName for uniqueness: "{repoName}_{title}"
+			repoName := filepath.Base(m.selectedRepoPath)
+			instance.InternalName = fmt.Sprintf("%s_%s", repoName, instance.Title)
 
 			// 'n' key path: no prompt needed, start immediately
 			if err := instance.Start(true); err != nil {
@@ -441,6 +483,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			// Store prompt on instance - will be sent after Start()
 			selected.Prompt = prompt
 
+			// Set InternalName for uniqueness: "{repoName}_{title}"
+			repoName := filepath.Base(m.selectedRepoPath)
+			selected.InternalName = fmt.Sprintf("%s_%s", repoName, selected.Title)
+
 			// Set status to Loading while worktree is being created
 			selected.SetStatus(session.Loading)
 
@@ -501,42 +547,31 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    ".",
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
-		}
-
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
 		m.promptAfterName = true
-
-		return m, nil
+		// If repos are configured, show repo selector first
+		if len(m.repos) > 0 {
+			sortedRepos := m.appConfig.GetReposSortedByUsage(m.repos)
+			m.repoSelectorOverlay = overlay.NewRepoSelectorOverlay(sortedRepos)
+			m.state = stateRepoSelect
+			return m, nil
+		}
+		// No repos configured, use current directory
+		return m.createNewInstance(".")
 	case keys.KeyNew:
 		if m.list.NumInstances() >= GlobalInstanceLimit {
 			return m, m.handleError(
 				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
 		}
-		instance, err := session.NewInstance(session.InstanceOptions{
-			Title:   "",
-			Path:    ".",
-			Program: m.program,
-		})
-		if err != nil {
-			return m, m.handleError(err)
+		m.promptAfterName = false
+		// If repos are configured, show repo selector first
+		if len(m.repos) > 0 {
+			sortedRepos := m.appConfig.GetReposSortedByUsage(m.repos)
+			m.repoSelectorOverlay = overlay.NewRepoSelectorOverlay(sortedRepos)
+			m.state = stateRepoSelect
+			return m, nil
 		}
-
-		m.newInstanceFinalizer = m.list.AddInstance(instance)
-		m.list.SetSelectedInstance(m.list.NumInstances() - 1)
-		m.state = stateNew
-		m.menu.SetState(ui.StateNewInstance)
-
-		return m, nil
+		// No repos configured, use current directory
+		return m.createNewInstance(".")
 	case keys.KeyUp:
 		m.list.Up()
 		return m, m.instanceChanged()
@@ -576,8 +611,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				return fmt.Errorf("instance %s is currently checked out", selected.Title)
 			}
 
-			// Delete from storage first
-			if err := m.storage.DeleteInstance(selected.Title); err != nil {
+			// Delete from storage first (using InternalName for uniqueness)
+			if err := m.storage.DeleteInstance(selected.InternalName); err != nil {
 				return err
 			}
 
@@ -730,6 +765,26 @@ func (m *home) handleError(err error) tea.Cmd {
 	}
 }
 
+// createNewInstance creates a new instance with the given repo path
+func (m *home) createNewInstance(repoPath string) (tea.Model, tea.Cmd) {
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Title:   "",
+		Path:    repoPath,
+		Program: m.program,
+	})
+	if err != nil {
+		return m, m.handleError(err)
+	}
+
+	m.selectedRepoPath = repoPath
+	m.newInstanceFinalizer = m.list.AddInstance(instance)
+	m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+	m.state = stateNew
+	m.menu.SetState(ui.StateNewInstance)
+
+	return m, nil
+}
+
 // confirmAction shows a confirmation modal and stores the action to execute on confirm
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
@@ -767,7 +822,12 @@ func (m *home) View() string {
 		m.errBox.String(),
 	)
 
-	if m.state == statePrompt {
+	if m.state == stateRepoSelect {
+		if m.repoSelectorOverlay == nil {
+			log.ErrorLog.Printf("repo selector overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.repoSelectorOverlay.Render(), mainView, true, true)
+	} else if m.state == statePrompt {
 		if m.textInputOverlay == nil {
 			log.ErrorLog.Printf("text input overlay is nil")
 		}
