@@ -5,6 +5,7 @@ import (
 	"claude-squad/session"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -52,6 +53,15 @@ var mainTitle = lipgloss.NewStyle().
 var autoYesStyle = lipgloss.NewStyle().
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.Color("#1a1a1a"))
+
+var groupHeaderStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"})
+
+// repoGroup represents a group of instances for a single repository
+type repoGroup struct {
+	repoName  string
+	instances []*session.Instance
+}
 
 type List struct {
 	items         []*session.Instance
@@ -253,13 +263,35 @@ func (l *List) String() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 
-	// Render the list.
-	for i, item := range l.items {
-		b.WriteString(l.renderer.Render(item, i+1, i == l.selectedIdx, len(l.repos) > 1))
-		if i != len(l.items)-1 {
+	// Build grouped view and render
+	groups := l.getGroupedInstances()
+	renderedIdx := 0
+
+	for groupIdx, group := range groups {
+		// Render group header
+		b.WriteString(l.renderGroupHeader(group.repoName))
+		b.WriteString("\n")
+
+		// Render instances in this group
+		for instIdx, inst := range group.instances {
+			actualIdx := l.findInstanceIndex(inst)
+			isSelected := actualIdx == l.selectedIdx
+
+			b.WriteString(l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1))
+			renderedIdx++
+
+			// Add spacing between instances within a group
+			if instIdx < len(group.instances)-1 {
+				b.WriteString("\n\n")
+			}
+		}
+
+		// Add extra spacing between groups
+		if groupIdx < len(groups)-1 {
 			b.WriteString("\n\n")
 		}
 	}
+
 	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
 }
 
@@ -371,4 +403,84 @@ func (l *List) SetSelectedInstance(idx int) {
 // GetInstances returns all instances in the list
 func (l *List) GetInstances() []*session.Instance {
 	return l.items
+}
+
+// getGroupedInstances returns instances grouped by repo, sorted alphabetically by repo name,
+// with instances sorted by creation time (oldest first) within each group.
+func (l *List) getGroupedInstances() []repoGroup {
+	// Build map of repo name -> instances
+	repoMap := make(map[string][]*session.Instance)
+	for _, inst := range l.items {
+		var repoName string
+		if inst.Started() {
+			name, err := inst.RepoName()
+			if err == nil {
+				repoName = name
+			}
+		}
+		if repoName == "" {
+			repoName = "(unknown)"
+		}
+		repoMap[repoName] = append(repoMap[repoName], inst)
+	}
+
+	// Get sorted repo names
+	repoNames := make([]string, 0, len(repoMap))
+	for name := range repoMap {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+
+	// Build groups with sorted instances
+	groups := make([]repoGroup, 0, len(repoNames))
+	for _, name := range repoNames {
+		instances := repoMap[name]
+		// Sort by CreatedAt ascending (oldest first)
+		sort.Slice(instances, func(i, j int) bool {
+			return instances[i].CreatedAt.Before(instances[j].CreatedAt)
+		})
+		groups = append(groups, repoGroup{
+			repoName:  name,
+			instances: instances,
+		})
+	}
+
+	return groups
+}
+
+// renderGroupHeader renders a visual separator header for a repository group
+func (l *List) renderGroupHeader(repoName string) string {
+	// Calculate available width for the header line
+	width := l.renderer.width
+	if width <= 0 {
+		width = 40 // default fallback
+	}
+
+	// Build header: "───── repo-name ─────"
+	nameLen := runewidth.StringWidth(repoName)
+	totalDashes := width - nameLen - 2 // -2 for spaces around name
+	leftDashes := totalDashes / 2
+	rightDashes := totalDashes - leftDashes
+
+	if leftDashes < 2 {
+		leftDashes = 2
+		rightDashes = 2
+	}
+
+	header := fmt.Sprintf("%s %s %s",
+		strings.Repeat("─", leftDashes),
+		repoName,
+		strings.Repeat("─", rightDashes))
+
+	return groupHeaderStyle.Render(header)
+}
+
+// findInstanceIndex returns the index of an instance in l.items, or -1 if not found
+func (l *List) findInstanceIndex(target *session.Instance) int {
+	for i, inst := range l.items {
+		if inst == target {
+			return i
+		}
+	}
+	return -1
 }
