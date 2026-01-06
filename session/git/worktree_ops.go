@@ -70,34 +70,34 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	return nil
 }
 
-// setupNewWorktree creates a new worktree from HEAD
+// setupNewWorktree creates a new worktree from origin/main
 func (g *GitWorktree) setupNewWorktree() error {
-	// Get HEAD commit first - this is fast and we need it anyway
-	output, err := g.runGitCommand(g.repoPath, "rev-parse", "HEAD")
+	// Get origin/main commit to branch from
+	output, err := g.runGitCommand(g.repoPath, "rev-parse", "origin/main")
 	if err != nil {
-		if strings.Contains(err.Error(), "fatal: ambiguous argument 'HEAD'") ||
-			strings.Contains(err.Error(), "fatal: not a valid object name") ||
-			strings.Contains(err.Error(), "fatal: HEAD: not a valid object name") {
-			return fmt.Errorf("this appears to be a brand new repository: please create an initial commit before creating an instance")
+		if strings.Contains(err.Error(), "unknown revision") ||
+			strings.Contains(err.Error(), "fatal: ambiguous argument") ||
+			strings.Contains(err.Error(), "fatal: not a valid object name") {
+			return fmt.Errorf("could not find origin/main: ensure the repository has a remote named 'origin' with a 'main' branch")
 		}
-		return fmt.Errorf("failed to get HEAD commit hash: %w", err)
+		return fmt.Errorf("failed to get origin/main commit hash: %w", err)
 	}
-	headCommit := strings.TrimSpace(string(output))
-	g.baseCommitSHA = headCommit
+	mainCommit := strings.TrimSpace(string(output))
+	g.baseCommitSHA = mainCommit
 
-	// Create a new worktree from the HEAD commit
+	// Create a new worktree from origin/main
 	// The -b flag creates the branch, no need for separate cleanup since branch doesn't exist
 	// (we already checked in Setup())
-	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, headCommit); err != nil {
+	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, mainCommit); err != nil {
 		// If it fails due to existing worktree/branch, try cleanup and retry once
 		if strings.Contains(err.Error(), "already exists") {
 			g.cleanupForRetry()
-			if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, headCommit); err != nil {
-				return fmt.Errorf("failed to create worktree from commit %s: %w", headCommit, err)
+			if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, mainCommit); err != nil {
+				return fmt.Errorf("failed to create worktree from commit %s: %w", mainCommit, err)
 			}
 			return nil
 		}
-		return fmt.Errorf("failed to create worktree from commit %s: %w", headCommit, err)
+		return fmt.Errorf("failed to create worktree from commit %s: %w", mainCommit, err)
 	}
 
 	return nil
