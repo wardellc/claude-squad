@@ -11,6 +11,12 @@ import (
 
 // Setup creates a new worktree for the session
 func (g *GitWorktree) Setup() error {
+	// Fetch main branch from origin to ensure we have the latest state
+	if _, err := g.runGitCommand(g.repoPath, "fetch", "origin", "main"); err != nil {
+		// Log warning but continue - fetch failure shouldn't block worktree creation
+		log.WarningLog.Printf("failed to fetch main from origin: %v", err)
+	}
+
 	// Ensure worktrees directory exists early (can be done in parallel with branch check)
 	worktreesDir, err := getWorktreeDirectory()
 	if err != nil {
