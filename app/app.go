@@ -344,9 +344,10 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 				name := m.instanceFormOverlay.GetName()
 				repo := m.instanceFormOverlay.GetSelectedRepo()
 				prompt := m.instanceFormOverlay.GetPrompt()
+				dangerouslySkipPermissions := m.instanceFormOverlay.GetDangerouslySkipPermissions()
 
 				m.instanceFormOverlay = nil
-				return m.createInstanceFromForm(name, repo.Path, prompt)
+				return m.createInstanceFromForm(name, repo.Path, prompt, dangerouslySkipPermissions)
 			}
 			// Canceled
 			m.instanceFormOverlay = nil
@@ -628,16 +629,17 @@ func (m *home) handleError(err error) tea.Cmd {
 }
 
 // createInstanceFromForm creates a new instance from the form values
-func (m *home) createInstanceFromForm(name, repoPath, prompt string) (tea.Model, tea.Cmd) {
+func (m *home) createInstanceFromForm(name, repoPath, prompt string, dangerouslySkipPermissions bool) (tea.Model, tea.Cmd) {
 	// Use current directory if no repo path
 	if repoPath == "" {
 		repoPath = "."
 	}
 
 	instance, err := session.NewInstance(session.InstanceOptions{
-		Title:   name,
-		Path:    repoPath,
-		Program: m.program,
+		Title:                      name,
+		Path:                       repoPath,
+		Program:                    m.program,
+		DangerouslySkipPermissions: dangerouslySkipPermissions,
 	})
 	if err != nil {
 		return m, m.handleError(err)

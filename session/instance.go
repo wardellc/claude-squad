@@ -55,6 +55,8 @@ type Instance struct {
 	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
+	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
+	DangerouslySkipPermissions bool
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
@@ -75,17 +77,18 @@ type Instance struct {
 // ToInstanceData converts an Instance to its serializable form
 func (i *Instance) ToInstanceData() InstanceData {
 	data := InstanceData{
-		Title:        i.Title,
-		InternalName: i.InternalName,
-		Path:         i.Path,
-		Branch:       i.Branch,
-		Status:       i.Status,
-		Height:       i.Height,
-		Width:        i.Width,
-		CreatedAt:    i.CreatedAt,
-		UpdatedAt:    time.Now(),
-		Program:      i.Program,
-		AutoYes:      i.AutoYes,
+		Title:                      i.Title,
+		InternalName:               i.InternalName,
+		Path:                       i.Path,
+		Branch:                     i.Branch,
+		Status:                     i.Status,
+		Height:                     i.Height,
+		Width:                      i.Width,
+		CreatedAt:                  i.CreatedAt,
+		UpdatedAt:                  time.Now(),
+		Program:                    i.Program,
+		AutoYes:                    i.AutoYes,
+		DangerouslySkipPermissions: i.DangerouslySkipPermissions,
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -120,16 +123,17 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 	}
 
 	instance := &Instance{
-		Title:        data.Title,
-		InternalName: internalName,
-		Path:         data.Path,
-		Branch:       data.Branch,
-		Status:       data.Status,
-		Height:       data.Height,
-		Width:        data.Width,
-		CreatedAt:    data.CreatedAt,
-		UpdatedAt:    data.UpdatedAt,
-		Program:      data.Program,
+		Title:                      data.Title,
+		InternalName:               internalName,
+		Path:                       data.Path,
+		Branch:                     data.Branch,
+		Status:                     data.Status,
+		Height:                     data.Height,
+		Width:                      data.Width,
+		CreatedAt:                  data.CreatedAt,
+		UpdatedAt:                  data.UpdatedAt,
+		Program:                    data.Program,
+		DangerouslySkipPermissions: data.DangerouslySkipPermissions,
 		gitWorktree: git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -146,7 +150,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 
 	if instance.Paused() {
 		instance.started = true
-		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program)
+		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program, instance.DangerouslySkipPermissions)
 	} else {
 		if err := instance.Start(false); err != nil {
 			return nil, err
@@ -166,6 +170,8 @@ type InstanceOptions struct {
 	Program string
 	// If AutoYes is true, then
 	AutoYes bool
+	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
+	DangerouslySkipPermissions bool
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
@@ -178,15 +184,16 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		Title:     opts.Title,
-		Status:    Ready,
-		Path:      absPath,
-		Program:   opts.Program,
-		Height:    0,
-		Width:     0,
-		CreatedAt: t,
-		UpdatedAt: t,
-		AutoYes:   false,
+		Title:                      opts.Title,
+		Status:                     Ready,
+		Path:                       absPath,
+		Program:                    opts.Program,
+		Height:                     0,
+		Width:                      0,
+		CreatedAt:                  t,
+		UpdatedAt:                  t,
+		AutoYes:                    false,
+		DangerouslySkipPermissions: opts.DangerouslySkipPermissions,
 	}, nil
 }
 
@@ -216,7 +223,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		tmuxSession = i.tmuxSession
 	} else {
 		// Create new tmux session using InternalName for uniqueness
-		tmuxSession = tmux.NewTmuxSession(i.InternalName, i.Program)
+		tmuxSession = tmux.NewTmuxSession(i.InternalName, i.Program, i.DangerouslySkipPermissions)
 	}
 	i.tmuxSession = tmuxSession
 

@@ -565,4 +565,3 @@ func (l *List) findInstanceIndex(target *session.Instance) int {
 	}
 	return -1
 }
-
