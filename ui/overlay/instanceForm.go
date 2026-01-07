@@ -16,14 +16,16 @@ const (
 	FieldName FormField = iota
 	FieldRepo
 	FieldPrompt
+	FieldDangerouslySkipPermissions
 )
 
 // InstanceFormOverlay represents the unified instance creation form
 type InstanceFormOverlay struct {
 	// Field values
-	nameInput    textinput.Model
-	selectedRepo config.RepoInfo
-	promptInput  textinput.Model
+	nameInput                  textinput.Model
+	selectedRepo               config.RepoInfo
+	promptInput                textinput.Model
+	dangerouslySkipPermissions bool
 
 	// Available repos
 	repos []config.RepoInfo
@@ -62,16 +64,17 @@ func NewInstanceFormOverlay(repos []config.RepoInfo, defaultRepo config.RepoInfo
 	promptInput.Blur()
 
 	return &InstanceFormOverlay{
-		nameInput:     nameInput,
-		selectedRepo:  defaultRepo,
-		promptInput:   promptInput,
-		repos:         repos,
-		focusedField:  FieldName,
-		searchMode:    false,
-		filteredRepos: repos,
-		searchIndex:   0,
-		submitted:     false,
-		canceled:      false,
+		nameInput:                  nameInput,
+		selectedRepo:               defaultRepo,
+		promptInput:                promptInput,
+		dangerouslySkipPermissions: true, // Default to true
+		repos:                      repos,
+		focusedField:               FieldName,
+		searchMode:                 false,
+		filteredRepos:              repos,
+		searchIndex:                0,
+		submitted:                  false,
+		canceled:                   false,
 	}
 }
 
@@ -140,18 +143,20 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		return f.handleRepoFieldKey(msg)
 	case FieldPrompt:
 		return f.handlePromptFieldKey(msg)
+	case FieldDangerouslySkipPermissions:
+		return f.handleDangerouslySkipPermissionsKey(msg)
 	}
 
 	return false
 }
 
 func (f *InstanceFormOverlay) nextField() {
-	f.focusedField = (f.focusedField + 1) % 3
+	f.focusedField = (f.focusedField + 1) % 4
 	f.updateFieldFocus()
 }
 
 func (f *InstanceFormOverlay) prevField() {
-	f.focusedField = (f.focusedField + 2) % 3 // +2 is same as -1 mod 3
+	f.focusedField = (f.focusedField + 3) % 4 // +3 is same as -1 mod 4
 	f.updateFieldFocus()
 }
 
@@ -166,6 +171,9 @@ func (f *InstanceFormOverlay) updateFieldFocus() {
 	case FieldPrompt:
 		f.nameInput.Blur()
 		f.promptInput.Focus()
+	case FieldDangerouslySkipPermissions:
+		f.nameInput.Blur()
+		f.promptInput.Blur()
 	}
 }
 
@@ -272,7 +280,7 @@ func (f *InstanceFormOverlay) handleSearchModeKey(msg tea.KeyMsg) bool {
 }
 
 func (f *InstanceFormOverlay) handlePromptFieldKey(msg tea.KeyMsg) bool {
-	// Enter on prompt field submits (if valid) since it's the last field
+	// Enter on prompt field submits (if valid)
 	if msg.Type == tea.KeyEnter {
 		if f.validate() {
 			f.submitted = true
@@ -283,6 +291,25 @@ func (f *InstanceFormOverlay) handlePromptFieldKey(msg tea.KeyMsg) bool {
 
 	// Pass other keys to the text input
 	f.promptInput, _ = f.promptInput.Update(msg)
+	return false
+}
+
+func (f *InstanceFormOverlay) handleDangerouslySkipPermissionsKey(msg tea.KeyMsg) bool {
+	// Tab toggles the value
+	if msg.Type == tea.KeyTab {
+		f.dangerouslySkipPermissions = !f.dangerouslySkipPermissions
+		return false
+	}
+
+	// Enter submits the form if valid
+	if msg.Type == tea.KeyEnter {
+		if f.validate() {
+			f.submitted = true
+			return true
+		}
+		return false
+	}
+
 	return false
 }
 
@@ -338,6 +365,11 @@ func (f *InstanceFormOverlay) GetSelectedRepo() config.RepoInfo {
 // GetPrompt returns the entered prompt
 func (f *InstanceFormOverlay) GetPrompt() string {
 	return f.promptInput.Value()
+}
+
+// GetDangerouslySkipPermissions returns whether to skip permissions
+func (f *InstanceFormOverlay) GetDangerouslySkipPermissions() bool {
+	return f.dangerouslySkipPermissions
 }
 
 // IsSubmitted returns whether the form was submitted
@@ -479,6 +511,22 @@ func (f *InstanceFormOverlay) Render() string {
 		content.WriteString(labelStyle.Render("Prompt: "))
 	}
 	content.WriteString(f.promptInput.View())
+	content.WriteString("\n\n")
+
+	// Skip Permissions field
+	if f.focusedField == FieldDangerouslySkipPermissions {
+		content.WriteString(focusedLabelStyle.Render("Skip Permissions: "))
+	} else {
+		content.WriteString(labelStyle.Render("Skip Permissions: "))
+	}
+	if f.dangerouslySkipPermissions {
+		content.WriteString("[Yes]")
+	} else {
+		content.WriteString("[No]")
+	}
+	if f.focusedField == FieldDangerouslySkipPermissions {
+		content.WriteString(dimStyle.Render("  [Tab to toggle]"))
+	}
 	content.WriteString("\n")
 
 	// Help text

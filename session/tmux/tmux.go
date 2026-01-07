@@ -31,6 +31,8 @@ type TmuxSession struct {
 	// The name of the tmux session and the sanitized name used for tmux commands.
 	sanitizedName string
 	program       string
+	// dangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
+	dangerouslySkipPermissions bool
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -68,21 +70,22 @@ func toClaudeSquadTmuxName(str string) string {
 }
 
 // NewTmuxSession creates a new TmuxSession with the given name and program.
-func NewTmuxSession(name string, program string) *TmuxSession {
-	return newTmuxSession(name, program, MakePtyFactory(), cmd.MakeExecutor())
+func NewTmuxSession(name string, program string, dangerouslySkipPermissions bool) *TmuxSession {
+	return newTmuxSession(name, program, dangerouslySkipPermissions, MakePtyFactory(), cmd.MakeExecutor())
 }
 
 // NewTmuxSessionWithDeps creates a new TmuxSession with provided dependencies for testing.
-func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
-	return newTmuxSession(name, program, ptyFactory, cmdExec)
+func NewTmuxSessionWithDeps(name string, program string, dangerouslySkipPermissions bool, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+	return newTmuxSession(name, program, dangerouslySkipPermissions, ptyFactory, cmdExec)
 }
 
-func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+func newTmuxSession(name string, program string, dangerouslySkipPermissions bool, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return &TmuxSession{
-		sanitizedName: toClaudeSquadTmuxName(name),
-		program:       program,
-		ptyFactory:    ptyFactory,
-		cmdExec:       cmdExec,
+		sanitizedName:              toClaudeSquadTmuxName(name),
+		program:                    program,
+		dangerouslySkipPermissions: dangerouslySkipPermissions,
+		ptyFactory:                 ptyFactory,
+		cmdExec:                    cmdExec,
 	}
 }
 
@@ -94,8 +97,14 @@ func (t *TmuxSession) Start(workDir string) error {
 		return fmt.Errorf("tmux session already exists: %s", t.sanitizedName)
 	}
 
+	// Determine the program command, appending --dangerously-skip-permissions for Claude if enabled
+	program := t.program
+	if t.dangerouslySkipPermissions && strings.HasPrefix(t.program, ProgramClaude) {
+		program = t.program + " --dangerously-skip-permissions"
+	}
+
 	// Create a new detached tmux session and start claude in it
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, t.program)
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", t.sanitizedName, "-c", workDir, program)
 
 	ptmx, err := t.ptyFactory.Start(cmd)
 	if err != nil {
