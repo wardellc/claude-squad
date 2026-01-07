@@ -43,11 +43,17 @@ var (
 			// Build the list of repositories
 			var repos []config.RepoInfo
 
-			// If --repos-dir is specified, discover repos in that directory
-			if reposDirFlag != "" {
-				discovered, err := config.DiscoverRepos(reposDirFlag)
+			// Use flag if specified, otherwise fall back to config
+			reposDir := reposDirFlag
+			if reposDir == "" {
+				reposDir = cfg.ReposDir
+			}
+
+			// If repos-dir is specified (via flag or config), discover repos in that directory
+			if reposDir != "" {
+				discovered, err := config.DiscoverRepos(reposDir)
 				if err != nil {
-					return fmt.Errorf("failed to discover repos in %s: %w", reposDirFlag, err)
+					return fmt.Errorf("failed to discover repos in %s: %w", reposDir, err)
 				}
 				repos = append(repos, discovered...)
 			}

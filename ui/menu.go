@@ -129,7 +129,7 @@ func (m *Menu) addInstanceOptions() {
 	if m.instance.Status == session.Paused {
 		actionGroup = append(actionGroup, keys.KeyResume)
 	} else {
-		actionGroup = append(actionGroup, keys.KeyCheckout)
+		actionGroup = append(actionGroup, keys.KeyCheckout, keys.KeyOpenEditor)
 	}
 
 	// Navigation group (when in diff tab)
@@ -162,8 +162,8 @@ func (m *Menu) String() string {
 		end   int
 	}{
 		{0, 2}, // Instance management group (n, d)
-		{2, 5}, // Action group (enter, submit, pause/resume)
-		{6, 8}, // System group (tab, help, q)
+		{2, 6}, // Action group (enter, submit, pause/resume, editor)
+		{7, 9}, // System group (tab, help, q)
 	}
 
 	for i, k := range m.options {

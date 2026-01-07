@@ -396,6 +396,17 @@ func (l *List) Up() {
 	}
 }
 
+// JumpToDisplayIndex jumps to the item at the given 1-indexed display position.
+// Returns true if the jump was successful, false if the index is out of bounds.
+func (l *List) JumpToDisplayIndex(idx int) bool {
+	displayOrder := l.getDisplayOrder()
+	if idx < 1 || idx > len(displayOrder) {
+		return false
+	}
+	l.selectedIdx = l.findInstanceIndex(displayOrder[idx-1])
+	return true
+}
+
 func (l *List) addRepo(repo string) {
 	if _, ok := l.repos[repo]; !ok {
 		l.repos[repo] = 0

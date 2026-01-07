@@ -50,6 +50,8 @@ type Config struct {
 	RepoUsageCounts map[string]int `json:"repo_usage_counts,omitempty"`
 	// LastUsedRepoPath tracks the most recently used repository path
 	LastUsedRepoPath string `json:"last_used_repo_path,omitempty"`
+	// ReposDir is the default directory containing git repositories to manage
+	ReposDir string `json:"repos_dir,omitempty"`
 }
 
 // DefaultConfig returns the default configuration

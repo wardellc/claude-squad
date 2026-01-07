@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -421,6 +422,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case keys.KeyDown:
 		m.list.Down()
 		return m, m.instanceChanged()
+	case keys.KeyJumpToInstance:
+		digit, _ := strconv.Atoi(msg.String())
+		if m.list.JumpToDisplayIndex(digit) {
+			return m, m.instanceChanged()
+		}
+		return m, nil
 	case keys.KeyShiftUp:
 		m.tabbedWindow.ScrollUp()
 		return m, m.instanceChanged()

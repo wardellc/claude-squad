@@ -29,6 +29,8 @@ const (
 	// Diff keybindings
 	KeyShiftUp
 	KeyShiftDown
+
+	KeyJumpToInstance // Jump to instance by number (1-9)
 )
 
 // GlobalKeyStringsMap is a global, immutable map string to keybinding.
@@ -51,6 +53,15 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"p":          KeySubmit,
 	"?":          KeyHelp,
 	"e":          KeyOpenEditor,
+	"1":          KeyJumpToInstance,
+	"2":          KeyJumpToInstance,
+	"3":          KeyJumpToInstance,
+	"4":          KeyJumpToInstance,
+	"5":          KeyJumpToInstance,
+	"6":          KeyJumpToInstance,
+	"7":          KeyJumpToInstance,
+	"8":          KeyJumpToInstance,
+	"9":          KeyJumpToInstance,
 }
 
 // GlobalkeyBindings is a global, immutable map of KeyName tot keybinding.
@@ -121,5 +132,9 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 	KeySubmitName: key.NewBinding(
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "submit name"),
+	),
+	KeyJumpToInstance: key.NewBinding(
+		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
+		key.WithHelp("1-9", "jump"),
 	),
 }
