@@ -84,3 +84,47 @@ func findGitRepoRoot(path string) (string, error) {
 		currentPath = parent
 	}
 }
+
+// BranchInfo represents a git branch with metadata
+type BranchInfo struct {
+	Name     string // Full branch name (e.g., "origin/main", "feature/xyz")
+	IsRemote bool   // True if remote branch
+}
+
+// ListBranches returns all local and remote branches for a repository
+// Branches are sorted: remote main first, then other remotes, then locals
+func ListBranches(repoPath string) ([]BranchInfo, error) {
+	cmd := exec.Command("git", "-C", repoPath, "branch", "-a", "--format=%(refname:short)")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list branches: %w", err)
+	}
+
+	var remoteMain, otherRemotes, locals []BranchInfo
+	seen := make(map[string]bool)
+
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || seen[line] || strings.Contains(line, "HEAD") {
+			continue
+		}
+		seen[line] = true
+
+		isRemote := strings.HasPrefix(line, "origin/")
+		isMain := strings.HasSuffix(line, "/main") || line == "main"
+
+		branch := BranchInfo{Name: line, IsRemote: isRemote}
+
+		if isRemote && isMain {
+			remoteMain = append(remoteMain, branch)
+		} else if isRemote {
+			otherRemotes = append(otherRemotes, branch)
+		} else {
+			locals = append(locals, branch)
+		}
+	}
+
+	// Combine: remote main first, then other remotes, then locals
+	result := append(remoteMain, otherRemotes...)
+	return append(result, locals...), nil
+}

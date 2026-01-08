@@ -29,25 +29,33 @@ type GitWorktree struct {
 	branchName string
 	// Base commit hash for the worktree
 	baseCommitSHA string
+	// Base branch to create worktree from (e.g., "origin/main", "develop")
+	baseBranch string
 }
 
-func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string) *GitWorktree {
+func NewGitWorktreeFromStorage(repoPath string, worktreePath string, sessionName string, branchName string, baseCommitSHA string, baseBranch string) *GitWorktree {
 	return &GitWorktree{
 		repoPath:      repoPath,
 		worktreePath:  worktreePath,
 		sessionName:   sessionName,
 		branchName:    branchName,
 		baseCommitSHA: baseCommitSHA,
+		baseBranch:    baseBranch,
 	}
 }
 
 // NewGitWorktree creates a new GitWorktree instance
-func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, branchname string, err error) {
+func NewGitWorktree(repoPath string, sessionName string, baseBranch string) (tree *GitWorktree, branchname string, err error) {
 	cfg := config.LoadConfig()
 	branchName := fmt.Sprintf("%s%s", cfg.BranchPrefix, sessionName)
 	// Sanitize the final branch name to handle invalid characters from any source
 	// (e.g., backslashes from Windows domain usernames like DOMAIN\user)
 	branchName = sanitizeBranchName(branchName)
+
+	// Default to origin/main if not specified
+	if baseBranch == "" {
+		baseBranch = "origin/main"
+	}
 
 	// Convert repoPath to absolute path
 	absPath, err := filepath.Abs(repoPath)
@@ -76,6 +84,7 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		sessionName:  sessionName,
 		branchName:   branchName,
 		worktreePath: worktreePath,
+		baseBranch:   baseBranch,
 	}, branchName, nil
 }
 
@@ -102,4 +111,9 @@ func (g *GitWorktree) GetRepoName() string {
 // GetBaseCommitSHA returns the base commit SHA for the worktree
 func (g *GitWorktree) GetBaseCommitSHA() string {
 	return g.baseCommitSHA
+}
+
+// GetBaseBranch returns the base branch for the worktree
+func (g *GitWorktree) GetBaseBranch() string {
+	return g.baseBranch
 }

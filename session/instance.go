@@ -57,6 +57,8 @@ type Instance struct {
 	Prompt string
 	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
 	DangerouslySkipPermissions bool
+	// BaseBranch is the branch to create the worktree from
+	BaseBranch string
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
@@ -99,6 +101,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 			SessionName:   i.Title,
 			BranchName:    i.gitWorktree.GetBranchName(),
 			BaseCommitSHA: i.gitWorktree.GetBaseCommitSHA(),
+			BaseBranch:    i.gitWorktree.GetBaseBranch(),
 		}
 	}
 
@@ -140,6 +143,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			data.Worktree.SessionName,
 			data.Worktree.BranchName,
 			data.Worktree.BaseCommitSHA,
+			data.Worktree.BaseBranch,
 		),
 		diffStats: &git.DiffStats{
 			Added:   data.DiffStats.Added,
@@ -172,6 +176,8 @@ type InstanceOptions struct {
 	AutoYes bool
 	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
 	DangerouslySkipPermissions bool
+	// BaseBranch is the branch to create the worktree from (defaults to "origin/main")
+	BaseBranch string
 }
 
 func NewInstance(opts InstanceOptions) (*Instance, error) {
@@ -194,6 +200,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		UpdatedAt:                  t,
 		AutoYes:                    false,
 		DangerouslySkipPermissions: opts.DangerouslySkipPermissions,
+		BaseBranch:                 opts.BaseBranch,
 	}, nil
 }
 
@@ -228,7 +235,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	i.tmuxSession = tmuxSession
 
 	if firstTimeSetup {
-		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title)
+		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title, i.BaseBranch)
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}

@@ -33,6 +33,7 @@ type GitWorktreeData struct {
 	SessionName   string `json:"session_name"`
 	BranchName    string `json:"branch_name"`
 	BaseCommitSHA string `json:"base_commit_sha"`
+	BaseBranch    string `json:"base_branch,omitempty"`
 }
 
 // DiffStatsData represents the serializable data of a DiffStats

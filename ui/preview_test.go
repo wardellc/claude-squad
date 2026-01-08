@@ -119,6 +119,24 @@ func setupGitRepo(t *testing.T, workdir string) {
 	commitCmd.Dir = workdir
 	err = commitCmd.Run()
 	require.NoError(t, err)
+
+	// Ensure we're on 'main' branch (git init might create 'master' on some systems)
+	branchCmd := exec.Command("git", "branch", "-M", "main")
+	branchCmd.Dir = workdir
+	_ = branchCmd.Run() // Ignore error if already on main
+
+	// Create a fake origin remote pointing to itself
+	// This allows git rev-parse origin/main to work
+	remoteCmd := exec.Command("git", "remote", "add", "origin", workdir)
+	remoteCmd.Dir = workdir
+	err = remoteCmd.Run()
+	require.NoError(t, err)
+
+	// Fetch from the fake origin to create origin/main
+	fetchCmd := exec.Command("git", "fetch", "origin")
+	fetchCmd.Dir = workdir
+	err = fetchCmd.Run()
+	require.NoError(t, err)
 }
 
 // TestPreviewScrolling tests the scrolling functionality in the preview pane

@@ -2,6 +2,7 @@ package overlay
 
 import (
 	"claude-squad/config"
+	"claude-squad/session/git"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -15,6 +16,7 @@ type FormField int
 const (
 	FieldName FormField = iota
 	FieldRepo
+	FieldBranch
 	FieldPrompt
 	FieldDangerouslySkipPermissions
 )
@@ -38,6 +40,14 @@ type InstanceFormOverlay struct {
 	searchQuery   string
 	filteredRepos []config.RepoInfo
 	searchIndex   int
+
+	// Branch selection
+	selectedBranch    string
+	branches          []git.BranchInfo
+	branchSearchMode  bool
+	branchSearchQuery string
+	filteredBranches  []git.BranchInfo
+	branchSearchIndex int
 
 	// Form state
 	submitted bool
@@ -63,7 +73,7 @@ func NewInstanceFormOverlay(repos []config.RepoInfo, defaultRepo config.RepoInfo
 	promptInput.CharLimit = 0
 	promptInput.Blur()
 
-	return &InstanceFormOverlay{
+	overlay := &InstanceFormOverlay{
 		nameInput:                  nameInput,
 		selectedRepo:               defaultRepo,
 		promptInput:                promptInput,
@@ -73,9 +83,19 @@ func NewInstanceFormOverlay(repos []config.RepoInfo, defaultRepo config.RepoInfo
 		searchMode:                 false,
 		filteredRepos:              repos,
 		searchIndex:                0,
+		selectedBranch:             "origin/main", // Default
+		branchSearchMode:           false,
+		branchSearchIndex:          0,
 		submitted:                  false,
 		canceled:                   false,
 	}
+
+	// Load branches for default repo if one is selected
+	if defaultRepo.Path != "" {
+		overlay.loadBranchesForRepo(defaultRepo.Path)
+	}
+
+	return overlay
 }
 
 // SetSize sets the overlay dimensions
@@ -104,12 +124,19 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			f.searchIndex = 0
 			return false
 		}
+		if f.branchSearchMode {
+			f.branchSearchMode = false
+			f.branchSearchQuery = ""
+			f.filteredBranches = f.branches
+			f.branchSearchIndex = 0
+			return false
+		}
 		f.canceled = true
 		return true
 	}
 
 	// Handle Ctrl+Enter to submit (check multiple ways it can be sent)
-	if !f.searchMode {
+	if !f.searchMode && !f.branchSearchMode {
 		// Ctrl+Enter can be sent as Ctrl+J, or as a special key
 		if msg.Type == tea.KeyCtrlJ || msg.String() == "ctrl+enter" {
 			if f.validate() {
@@ -123,6 +150,11 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 	// In search mode, handle search-specific keys
 	if f.searchMode {
 		return f.handleSearchModeKey(msg)
+	}
+
+	// In branch search mode, handle branch search-specific keys
+	if f.branchSearchMode {
+		return f.handleBranchSearchModeKey(msg)
 	}
 
 	// Handle Up/Down arrow keys for field navigation
@@ -141,6 +173,8 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		return f.handleNameFieldKey(msg)
 	case FieldRepo:
 		return f.handleRepoFieldKey(msg)
+	case FieldBranch:
+		return f.handleBranchFieldKey(msg)
 	case FieldPrompt:
 		return f.handlePromptFieldKey(msg)
 	case FieldDangerouslySkipPermissions:
@@ -151,12 +185,12 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 }
 
 func (f *InstanceFormOverlay) nextField() {
-	f.focusedField = (f.focusedField + 1) % 4
+	f.focusedField = (f.focusedField + 1) % 5
 	f.updateFieldFocus()
 }
 
 func (f *InstanceFormOverlay) prevField() {
-	f.focusedField = (f.focusedField + 3) % 4 // +3 is same as -1 mod 4
+	f.focusedField = (f.focusedField + 4) % 5 // +4 is same as -1 mod 5
 	f.updateFieldFocus()
 }
 
@@ -166,6 +200,9 @@ func (f *InstanceFormOverlay) updateFieldFocus() {
 		f.nameInput.Focus()
 		f.promptInput.Blur()
 	case FieldRepo:
+		f.nameInput.Blur()
+		f.promptInput.Blur()
+	case FieldBranch:
 		f.nameInput.Blur()
 		f.promptInput.Blur()
 	case FieldPrompt:
@@ -239,6 +276,8 @@ func (f *InstanceFormOverlay) handleSearchModeKey(msg tea.KeyMsg) bool {
 		// Select current repo and exit search mode
 		if f.searchIndex >= 0 && f.searchIndex < len(f.filteredRepos) {
 			f.selectedRepo = f.filteredRepos[f.searchIndex]
+			// Reload branches for the newly selected repo
+			f.loadBranchesForRepo(f.selectedRepo.Path)
 		}
 		f.searchMode = false
 		f.searchQuery = ""
@@ -313,6 +352,142 @@ func (f *InstanceFormOverlay) handleDangerouslySkipPermissionsKey(msg tea.KeyMsg
 	return false
 }
 
+func (f *InstanceFormOverlay) handleBranchFieldKey(msg tea.KeyMsg) bool {
+	// Tab opens search mode
+	if msg.Type == tea.KeyTab {
+		if len(f.branches) > 0 {
+			f.branchSearchMode = true
+			f.branchSearchQuery = ""
+			f.filteredBranches = f.branches
+			// Find current selection in filtered list
+			f.branchSearchIndex = 0
+			for i, branch := range f.filteredBranches {
+				if branch.Name == f.selectedBranch {
+					f.branchSearchIndex = i
+					break
+				}
+			}
+		}
+		return false
+	}
+
+	// Enter submits the form if valid
+	if msg.Type == tea.KeyEnter {
+		if f.validate() {
+			f.submitted = true
+			return true
+		}
+		return false
+	}
+
+	return false
+}
+
+func (f *InstanceFormOverlay) handleBranchSearchModeKey(msg tea.KeyMsg) bool {
+	switch msg.Type {
+	case tea.KeyUp:
+		if f.branchSearchIndex > 0 {
+			f.branchSearchIndex--
+		}
+		return false
+	case tea.KeyDown:
+		if f.branchSearchIndex < len(f.filteredBranches)-1 {
+			f.branchSearchIndex++
+		}
+		return false
+	case tea.KeyEnter:
+		// Select current branch and exit search mode
+		if f.branchSearchIndex >= 0 && f.branchSearchIndex < len(f.filteredBranches) {
+			f.selectedBranch = f.filteredBranches[f.branchSearchIndex].Name
+		}
+		f.branchSearchMode = false
+		f.branchSearchQuery = ""
+		f.filteredBranches = f.branches
+		return false
+	case tea.KeyBackspace:
+		if len(f.branchSearchQuery) > 0 {
+			f.branchSearchQuery = f.branchSearchQuery[:len(f.branchSearchQuery)-1]
+			f.filterBranches()
+		}
+		return false
+	case tea.KeyEsc:
+		f.branchSearchMode = false
+		f.branchSearchQuery = ""
+		f.filteredBranches = f.branches
+		return false
+	case tea.KeyRunes:
+		// Handle vim-style navigation in search mode
+		if len(msg.Runes) == 1 {
+			switch string(msg.Runes) {
+			case "j":
+				if f.branchSearchIndex < len(f.filteredBranches)-1 {
+					f.branchSearchIndex++
+				}
+				return false
+			case "k":
+				if f.branchSearchIndex > 0 {
+					f.branchSearchIndex--
+				}
+				return false
+			}
+		}
+		// Add character to search query
+		f.branchSearchQuery += string(msg.Runes)
+		f.filterBranches()
+		return false
+	case tea.KeySpace:
+		f.branchSearchQuery += " "
+		f.filterBranches()
+		return false
+	}
+
+	return false
+}
+
+func (f *InstanceFormOverlay) loadBranchesForRepo(repoPath string) {
+	branches, err := git.ListBranches(repoPath)
+	if err != nil {
+		// Log error but continue - will show empty list
+		f.branches = nil
+		f.filteredBranches = nil
+		f.selectedBranch = "origin/main"
+		return
+	}
+	f.branches = branches
+	f.filteredBranches = branches
+
+	// Reset selection to origin/main if available, otherwise first branch
+	f.selectedBranch = "origin/main"
+	found := false
+	for _, b := range branches {
+		if b.Name == "origin/main" {
+			found = true
+			break
+		}
+	}
+	if !found && len(branches) > 0 {
+		f.selectedBranch = branches[0].Name
+	}
+	f.branchSearchIndex = 0
+}
+
+func (f *InstanceFormOverlay) filterBranches() {
+	if f.branchSearchQuery == "" {
+		f.filteredBranches = f.branches
+	} else {
+		query := strings.ToLower(f.branchSearchQuery)
+		f.filteredBranches = nil
+		for _, branch := range f.branches {
+			if strings.Contains(strings.ToLower(branch.Name), query) {
+				f.filteredBranches = append(f.filteredBranches, branch)
+			}
+		}
+	}
+
+	// Always reset to top when filtering (first match is best match)
+	f.branchSearchIndex = 0
+}
+
 func (f *InstanceFormOverlay) filterRepos() {
 	if f.searchQuery == "" {
 		f.filteredRepos = f.repos
@@ -327,14 +502,8 @@ func (f *InstanceFormOverlay) filterRepos() {
 		}
 	}
 
-	// Reset selection index if out of bounds
-	if f.searchIndex >= len(f.filteredRepos) {
-		if len(f.filteredRepos) > 0 {
-			f.searchIndex = len(f.filteredRepos) - 1
-		} else {
-			f.searchIndex = 0
-		}
-	}
+	// Always reset to top when filtering (first match is best match)
+	f.searchIndex = 0
 }
 
 func (f *InstanceFormOverlay) validate() bool {
@@ -370,6 +539,11 @@ func (f *InstanceFormOverlay) GetPrompt() string {
 // GetDangerouslySkipPermissions returns whether to skip permissions
 func (f *InstanceFormOverlay) GetDangerouslySkipPermissions() bool {
 	return f.dangerouslySkipPermissions
+}
+
+// GetSelectedBranch returns the selected base branch
+func (f *InstanceFormOverlay) GetSelectedBranch() string {
+	return f.selectedBranch
 }
 
 // IsSubmitted returns whether the form was submitted
@@ -504,6 +678,81 @@ func (f *InstanceFormOverlay) Render() string {
 	}
 	content.WriteString("\n")
 
+	// Branch field
+	if f.focusedField == FieldBranch {
+		content.WriteString(focusedLabelStyle.Render("Base Branch: "))
+	} else {
+		content.WriteString(labelStyle.Render("Base Branch: "))
+	}
+
+	if f.branchSearchMode {
+		// Show search input and filtered list
+		searchInput := f.branchSearchQuery
+		if searchInput == "" {
+			searchInput = dimStyle.Render("Type to search...")
+		}
+		content.WriteString(searchInput)
+		content.WriteString("\n")
+
+		// Show filtered branches (max 5)
+		maxVisible := 5
+		if len(f.filteredBranches) < maxVisible {
+			maxVisible = len(f.filteredBranches)
+		}
+
+		// Calculate visible window around selection
+		startIdx := 0
+		if f.branchSearchIndex >= maxVisible {
+			startIdx = f.branchSearchIndex - maxVisible + 1
+		}
+		endIdx := startIdx + maxVisible
+		if endIdx > len(f.filteredBranches) {
+			endIdx = len(f.filteredBranches)
+			startIdx = endIdx - maxVisible
+			if startIdx < 0 {
+				startIdx = 0
+			}
+		}
+
+		for i := startIdx; i < endIdx; i++ {
+			branch := f.filteredBranches[i]
+			name := branch.Name
+			if len(name) > 30 {
+				name = name[:27] + "..."
+			}
+			// Add indicator for remote branches
+			if branch.IsRemote {
+				name = name + " (remote)"
+			}
+
+			if i == f.branchSearchIndex {
+				content.WriteString(selectedStyle.Render(" > " + name + " "))
+			} else {
+				content.WriteString(dimStyle.Render("   " + name))
+			}
+			content.WriteString("\n")
+		}
+
+		if len(f.filteredBranches) == 0 {
+			content.WriteString(dimStyle.Render("   No matching branches"))
+			content.WriteString("\n")
+		}
+	} else {
+		// Show selected branch
+		if f.selectedBranch != "" {
+			content.WriteString(f.selectedBranch)
+			if f.focusedField == FieldBranch {
+				content.WriteString(dimStyle.Render("  [Tab to change]"))
+			}
+		} else if len(f.branches) > 0 {
+			content.WriteString(dimStyle.Render("Press Tab to select"))
+		} else {
+			content.WriteString(dimStyle.Render("(select repository first)"))
+		}
+		content.WriteString("\n")
+	}
+	content.WriteString("\n")
+
 	// Prompt field
 	if f.focusedField == FieldPrompt {
 		content.WriteString(focusedLabelStyle.Render("Prompt: "))
@@ -531,7 +780,7 @@ func (f *InstanceFormOverlay) Render() string {
 
 	// Help text
 	var helpText string
-	if f.searchMode {
+	if f.searchMode || f.branchSearchMode {
 		helpText = "Type to filter | ↑/↓ navigate | Enter select | Esc cancel"
 	} else {
 		helpText = "↑/↓ navigate | Enter: submit | Esc: cancel"

@@ -11,10 +11,15 @@ import (
 
 // Setup creates a new worktree for the session
 func (g *GitWorktree) Setup() error {
-	// Fetch main branch from origin to ensure we have the latest state
-	if _, err := g.runGitCommand(g.repoPath, "fetch", "origin", "main"); err != nil {
-		// Log warning but continue - fetch failure shouldn't block worktree creation
-		log.WarningLog.Printf("failed to fetch main from origin: %v", err)
+	// Fetch the base branch from origin to ensure we have the latest state
+	// Extract branch name from base branch (e.g., "origin/main" -> "main")
+	baseBranchName := g.baseBranch
+	if strings.HasPrefix(baseBranchName, "origin/") {
+		baseBranchName = strings.TrimPrefix(baseBranchName, "origin/")
+		if _, err := g.runGitCommand(g.repoPath, "fetch", "origin", baseBranchName); err != nil {
+			// Log warning but continue - fetch failure shouldn't block worktree creation
+			log.WarningLog.Printf("failed to fetch %s from origin: %v", baseBranchName, err)
+		}
 	}
 
 	// Ensure worktrees directory exists early (can be done in parallel with branch check)
@@ -70,34 +75,34 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 	return nil
 }
 
-// setupNewWorktree creates a new worktree from origin/main
+// setupNewWorktree creates a new worktree from the configured base branch
 func (g *GitWorktree) setupNewWorktree() error {
-	// Get origin/main commit to branch from
-	output, err := g.runGitCommand(g.repoPath, "rev-parse", "origin/main")
+	// Get base branch commit to branch from
+	output, err := g.runGitCommand(g.repoPath, "rev-parse", g.baseBranch)
 	if err != nil {
 		if strings.Contains(err.Error(), "unknown revision") ||
 			strings.Contains(err.Error(), "fatal: ambiguous argument") ||
 			strings.Contains(err.Error(), "fatal: not a valid object name") {
-			return fmt.Errorf("could not find origin/main: ensure the repository has a remote named 'origin' with a 'main' branch")
+			return fmt.Errorf("could not find %s: ensure the branch exists", g.baseBranch)
 		}
-		return fmt.Errorf("failed to get origin/main commit hash: %w", err)
+		return fmt.Errorf("failed to get %s commit hash: %w", g.baseBranch, err)
 	}
-	mainCommit := strings.TrimSpace(string(output))
-	g.baseCommitSHA = mainCommit
+	baseCommit := strings.TrimSpace(string(output))
+	g.baseCommitSHA = baseCommit
 
-	// Create a new worktree from origin/main
+	// Create a new worktree from the base branch
 	// The -b flag creates the branch, no need for separate cleanup since branch doesn't exist
 	// (we already checked in Setup())
-	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, mainCommit); err != nil {
+	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
 		// If it fails due to existing worktree/branch, try cleanup and retry once
 		if strings.Contains(err.Error(), "already exists") {
 			g.cleanupForRetry()
-			if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, mainCommit); err != nil {
-				return fmt.Errorf("failed to create worktree from commit %s: %w", mainCommit, err)
+			if _, err := g.runGitCommand(g.repoPath, "worktree", "add", "-b", g.branchName, g.worktreePath, baseCommit); err != nil {
+				return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
 			}
 			return nil
 		}
-		return fmt.Errorf("failed to create worktree from commit %s: %w", mainCommit, err)
+		return fmt.Errorf("failed to create worktree from commit %s: %w", baseCommit, err)
 	}
 
 	return nil
