@@ -10,6 +10,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Permission modes for Claude instances
+const (
+	ModePlan   = "plan"
+	ModeBypass = "bypass"
+)
+
 // FormField represents which field is focused
 type FormField int
 
@@ -17,17 +23,17 @@ const (
 	FieldName FormField = iota
 	FieldRepo
 	FieldBranch
+	FieldMode
 	FieldPrompt
-	FieldDangerouslySkipPermissions
 )
 
 // InstanceFormOverlay represents the unified instance creation form
 type InstanceFormOverlay struct {
 	// Field values
-	nameInput                  textinput.Model
-	selectedRepo               config.RepoInfo
-	promptInput                textinput.Model
-	dangerouslySkipPermissions bool
+	nameInput      textinput.Model
+	selectedRepo   config.RepoInfo
+	promptInput    textinput.Model
+	permissionMode string // "plan" or "bypass"
 
 	// Available repos
 	repos []config.RepoInfo
@@ -74,20 +80,20 @@ func NewInstanceFormOverlay(repos []config.RepoInfo, defaultRepo config.RepoInfo
 	promptInput.Blur()
 
 	overlay := &InstanceFormOverlay{
-		nameInput:                  nameInput,
-		selectedRepo:               defaultRepo,
-		promptInput:                promptInput,
-		dangerouslySkipPermissions: true, // Default to true
-		repos:                      repos,
-		focusedField:               FieldName,
-		searchMode:                 false,
-		filteredRepos:              repos,
-		searchIndex:                0,
-		selectedBranch:             "origin/main", // Default
-		branchSearchMode:           false,
-		branchSearchIndex:          0,
-		submitted:                  false,
-		canceled:                   false,
+		nameInput:         nameInput,
+		selectedRepo:      defaultRepo,
+		promptInput:       promptInput,
+		permissionMode:    ModeBypass, // Default to bypass to maintain current behavior
+		repos:             repos,
+		focusedField:      FieldName,
+		searchMode:        false,
+		filteredRepos:     repos,
+		searchIndex:       0,
+		selectedBranch:    "origin/main", // Default
+		branchSearchMode:  false,
+		branchSearchIndex: 0,
+		submitted:         false,
+		canceled:          false,
 	}
 
 	// Load branches for default repo if one is selected
@@ -175,10 +181,10 @@ func (f *InstanceFormOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 		return f.handleRepoFieldKey(msg)
 	case FieldBranch:
 		return f.handleBranchFieldKey(msg)
+	case FieldMode:
+		return f.handlePermissionModeKey(msg)
 	case FieldPrompt:
 		return f.handlePromptFieldKey(msg)
-	case FieldDangerouslySkipPermissions:
-		return f.handleDangerouslySkipPermissionsKey(msg)
 	}
 
 	return false
@@ -205,12 +211,12 @@ func (f *InstanceFormOverlay) updateFieldFocus() {
 	case FieldBranch:
 		f.nameInput.Blur()
 		f.promptInput.Blur()
+	case FieldMode:
+		f.nameInput.Blur()
+		f.promptInput.Blur()
 	case FieldPrompt:
 		f.nameInput.Blur()
 		f.promptInput.Focus()
-	case FieldDangerouslySkipPermissions:
-		f.nameInput.Blur()
-		f.promptInput.Blur()
 	}
 }
 
@@ -333,10 +339,14 @@ func (f *InstanceFormOverlay) handlePromptFieldKey(msg tea.KeyMsg) bool {
 	return false
 }
 
-func (f *InstanceFormOverlay) handleDangerouslySkipPermissionsKey(msg tea.KeyMsg) bool {
-	// Tab toggles the value
+func (f *InstanceFormOverlay) handlePermissionModeKey(msg tea.KeyMsg) bool {
+	// Tab toggles between plan and bypass modes
 	if msg.Type == tea.KeyTab {
-		f.dangerouslySkipPermissions = !f.dangerouslySkipPermissions
+		if f.permissionMode == ModePlan {
+			f.permissionMode = ModeBypass
+		} else {
+			f.permissionMode = ModePlan
+		}
 		return false
 	}
 
@@ -536,9 +546,9 @@ func (f *InstanceFormOverlay) GetPrompt() string {
 	return f.promptInput.Value()
 }
 
-// GetDangerouslySkipPermissions returns whether to skip permissions
-func (f *InstanceFormOverlay) GetDangerouslySkipPermissions() bool {
-	return f.dangerouslySkipPermissions
+// GetPermissionMode returns the selected permission mode ("plan" or "bypass")
+func (f *InstanceFormOverlay) GetPermissionMode() string {
+	return f.permissionMode
 }
 
 // GetSelectedBranch returns the selected base branch
@@ -753,6 +763,22 @@ func (f *InstanceFormOverlay) Render() string {
 	}
 	content.WriteString("\n")
 
+	// Mode field
+	if f.focusedField == FieldMode {
+		content.WriteString(focusedLabelStyle.Render("Mode: "))
+	} else {
+		content.WriteString(labelStyle.Render("Mode: "))
+	}
+	if f.permissionMode == ModePlan {
+		content.WriteString("[Plan]")
+	} else {
+		content.WriteString("[Bypass Permissions]")
+	}
+	if f.focusedField == FieldMode {
+		content.WriteString(dimStyle.Render("  [Tab to toggle]"))
+	}
+	content.WriteString("\n\n")
+
 	// Prompt field
 	if f.focusedField == FieldPrompt {
 		content.WriteString(focusedLabelStyle.Render("Prompt: "))
@@ -760,22 +786,6 @@ func (f *InstanceFormOverlay) Render() string {
 		content.WriteString(labelStyle.Render("Prompt: "))
 	}
 	content.WriteString(f.promptInput.View())
-	content.WriteString("\n\n")
-
-	// Skip Permissions field
-	if f.focusedField == FieldDangerouslySkipPermissions {
-		content.WriteString(focusedLabelStyle.Render("Skip Permissions: "))
-	} else {
-		content.WriteString(labelStyle.Render("Skip Permissions: "))
-	}
-	if f.dangerouslySkipPermissions {
-		content.WriteString("[Yes]")
-	} else {
-		content.WriteString("[No]")
-	}
-	if f.focusedField == FieldDangerouslySkipPermissions {
-		content.WriteString(dimStyle.Render("  [Tab to toggle]"))
-	}
 	content.WriteString("\n")
 
 	// Help text

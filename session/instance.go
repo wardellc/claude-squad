@@ -55,8 +55,8 @@ type Instance struct {
 	AutoYes bool
 	// Prompt is the initial prompt to pass to the instance on startup
 	Prompt string
-	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
-	DangerouslySkipPermissions bool
+	// PermissionMode is the Claude permission mode ("plan" or "bypass")
+	PermissionMode string
 	// BaseBranch is the branch to create the worktree from
 	BaseBranch string
 
@@ -79,18 +79,18 @@ type Instance struct {
 // ToInstanceData converts an Instance to its serializable form
 func (i *Instance) ToInstanceData() InstanceData {
 	data := InstanceData{
-		Title:                      i.Title,
-		InternalName:               i.InternalName,
-		Path:                       i.Path,
-		Branch:                     i.Branch,
-		Status:                     i.Status,
-		Height:                     i.Height,
-		Width:                      i.Width,
-		CreatedAt:                  i.CreatedAt,
-		UpdatedAt:                  time.Now(),
-		Program:                    i.Program,
-		AutoYes:                    i.AutoYes,
-		DangerouslySkipPermissions: i.DangerouslySkipPermissions,
+		Title:          i.Title,
+		InternalName:   i.InternalName,
+		Path:           i.Path,
+		Branch:         i.Branch,
+		Status:         i.Status,
+		Height:         i.Height,
+		Width:          i.Width,
+		CreatedAt:      i.CreatedAt,
+		UpdatedAt:      time.Now(),
+		Program:        i.Program,
+		AutoYes:        i.AutoYes,
+		PermissionMode: i.PermissionMode,
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -125,18 +125,28 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		internalName = data.Title
 	}
 
+	// Backward compatibility: convert old DangerouslySkipPermissions to PermissionMode
+	permissionMode := data.PermissionMode
+	if permissionMode == "" {
+		if data.DangerouslySkipPermissions {
+			permissionMode = "bypass"
+		} else {
+			permissionMode = "bypass" // Default to bypass to maintain current behavior
+		}
+	}
+
 	instance := &Instance{
-		Title:                      data.Title,
-		InternalName:               internalName,
-		Path:                       data.Path,
-		Branch:                     data.Branch,
-		Status:                     data.Status,
-		Height:                     data.Height,
-		Width:                      data.Width,
-		CreatedAt:                  data.CreatedAt,
-		UpdatedAt:                  data.UpdatedAt,
-		Program:                    data.Program,
-		DangerouslySkipPermissions: data.DangerouslySkipPermissions,
+		Title:          data.Title,
+		InternalName:   internalName,
+		Path:           data.Path,
+		Branch:         data.Branch,
+		Status:         data.Status,
+		Height:         data.Height,
+		Width:          data.Width,
+		CreatedAt:      data.CreatedAt,
+		UpdatedAt:      data.UpdatedAt,
+		Program:        data.Program,
+		PermissionMode: permissionMode,
 		gitWorktree: git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -154,7 +164,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 
 	if instance.Paused() {
 		instance.started = true
-		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program, instance.DangerouslySkipPermissions)
+		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program, instance.PermissionMode)
 	} else {
 		if err := instance.Start(false); err != nil {
 			return nil, err
@@ -174,8 +184,8 @@ type InstanceOptions struct {
 	Program string
 	// If AutoYes is true, then
 	AutoYes bool
-	// DangerouslySkipPermissions enables --dangerously-skip-permissions flag for Claude
-	DangerouslySkipPermissions bool
+	// PermissionMode is the Claude permission mode ("plan" or "bypass")
+	PermissionMode string
 	// BaseBranch is the branch to create the worktree from (defaults to "origin/main")
 	BaseBranch string
 }
@@ -190,17 +200,17 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	return &Instance{
-		Title:                      opts.Title,
-		Status:                     Ready,
-		Path:                       absPath,
-		Program:                    opts.Program,
-		Height:                     0,
-		Width:                      0,
-		CreatedAt:                  t,
-		UpdatedAt:                  t,
-		AutoYes:                    false,
-		DangerouslySkipPermissions: opts.DangerouslySkipPermissions,
-		BaseBranch:                 opts.BaseBranch,
+		Title:          opts.Title,
+		Status:         Ready,
+		Path:           absPath,
+		Program:        opts.Program,
+		Height:         0,
+		Width:          0,
+		CreatedAt:      t,
+		UpdatedAt:      t,
+		AutoYes:        false,
+		PermissionMode: opts.PermissionMode,
+		BaseBranch:     opts.BaseBranch,
 	}, nil
 }
 
@@ -230,7 +240,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		tmuxSession = i.tmuxSession
 	} else {
 		// Create new tmux session using InternalName for uniqueness
-		tmuxSession = tmux.NewTmuxSession(i.InternalName, i.Program, i.DangerouslySkipPermissions)
+		tmuxSession = tmux.NewTmuxSession(i.InternalName, i.Program, i.PermissionMode)
 	}
 	i.tmuxSession = tmuxSession
 

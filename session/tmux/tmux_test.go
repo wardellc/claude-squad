@@ -42,10 +42,10 @@ func NewMockPtyFactory(t *testing.T) *MockPtyFactory {
 }
 
 func TestSanitizeName(t *testing.T) {
-	session := NewTmuxSession("asdf", "program", false)
+	session := NewTmuxSession("asdf", "program", "")
 	require.Equal(t, TmuxPrefix+"asdf", session.sanitizedName)
 
-	session = NewTmuxSession("a sd f . . asdf", "program", false)
+	session = NewTmuxSession("a sd f . . asdf", "program", "")
 	require.Equal(t, TmuxPrefix+"asdf__asdf", session.sanitizedName)
 }
 
@@ -67,7 +67,7 @@ func TestStartTmuxSession(t *testing.T) {
 	}
 
 	workdir := t.TempDir()
-	session := newTmuxSession("test-session", "claude", false, ptyFactory, cmdExec)
+	session := newTmuxSession("test-session", "claude", "", ptyFactory, cmdExec)
 
 	err := session.Start(workdir)
 	require.NoError(t, err)
