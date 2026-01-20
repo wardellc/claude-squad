@@ -194,20 +194,31 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hideErrMsg:
 		m.errBox.Clear()
 	case previewTickMsg:
-		// Refresh preview cache for the selected instance (the blocking tmux capture)
-		if selected := m.list.GetSelectedInstance(); selected != nil {
+		// Schedule next tick
+		nextTick := func() tea.Msg {
+			time.Sleep(100 * time.Millisecond)
+			return previewTickMsg{}
+		}
+		selected := m.list.GetSelectedInstance()
+		if selected == nil {
+			return m, nextTick
+		}
+		// Refresh preview asynchronously to avoid blocking UI
+		refreshCmd := func() tea.Msg {
 			if err := selected.RefreshPreview(); err != nil {
 				log.WarningLog.Printf("failed to refresh preview: %v", err)
 			}
+			return previewRefreshedMsg{instance: selected}
 		}
-		cmd := m.instanceChanged()
-		return m, tea.Batch(
-			cmd,
-			func() tea.Msg {
-				time.Sleep(100 * time.Millisecond)
-				return previewTickMsg{}
-			},
-		)
+		return m, tea.Batch(nextTick, refreshCmd)
+	case previewRefreshedMsg:
+		// Only update preview if the instance is still selected (handles rapid navigation)
+		if m.list.GetSelectedInstance() == msg.instance {
+			if err := m.tabbedWindow.UpdatePreview(msg.instance); err != nil {
+				return m, m.handleError(err)
+			}
+		}
+		return m, nil
 	case keyupMsg:
 		m.menu.ClearKeydown()
 		return m, nil
@@ -235,6 +246,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.newInstanceFinalizer()
 		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
 	case tickUpdateMetadataMessage:
+		selected := m.list.GetSelectedInstance()
 		for _, instance := range m.list.GetInstances() {
 			if !instance.Started() || instance.Paused() {
 				continue
@@ -249,9 +261,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					instance.SetStatus(session.Ready)
 				}
 			}
-			if err := instance.UpdateDiffStats(); err != nil {
-				log.WarningLog.Printf("could not update diff stats: %v", err)
+			// Only update diff stats for selected instance (expensive git operations)
+			if instance == selected {
+				if err := instance.UpdateDiffStats(); err != nil {
+					log.WarningLog.Printf("could not update diff stats: %v", err)
+				}
 			}
+		}
+		// Update diff pane for selected instance
+		if selected != nil {
+			m.tabbedWindow.UpdateDiff(selected)
 		}
 		return m, tickUpdateMetadataCmd
 	case tickUpdatePRInfoMessage:
@@ -575,15 +594,10 @@ func (m *home) instanceChanged() tea.Cmd {
 	// selected may be nil
 	selected := m.list.GetSelectedInstance()
 
-	m.tabbedWindow.UpdateDiff(selected)
+	// Only do fast in-memory updates here - preview and diff are updated asynchronously
+	// via previewRefreshedMsg (100ms ticker) and tickUpdateMetadataMessage (500ms ticker)
 	m.tabbedWindow.SetInstance(selected)
-	// Update menu with current instance
 	m.menu.SetInstance(selected)
-
-	// If there's no selected instance, we don't need to update the preview.
-	if err := m.tabbedWindow.UpdatePreview(selected); err != nil {
-		return m.handleError(err)
-	}
 	return nil
 }
 
@@ -607,6 +621,11 @@ type hideErrMsg struct{}
 
 // previewTickMsg implements tea.Msg and triggers a preview update
 type previewTickMsg struct{}
+
+// previewRefreshedMsg is sent when async preview refresh completes
+type previewRefreshedMsg struct {
+	instance *session.Instance
+}
 
 type tickUpdateMetadataMessage struct{}
 
