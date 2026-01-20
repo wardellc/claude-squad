@@ -3,6 +3,7 @@ package ui
 import (
 	"claude-squad/log"
 	"claude-squad/session"
+	"claude-squad/session/git"
 	"errors"
 	"fmt"
 	"sort"
@@ -56,6 +57,25 @@ var autoYesStyle = lipgloss.NewStyle().
 
 var groupHeaderStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#666666"})
+
+// PR info styles
+var prOpenStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#6366f1")) // Indigo for open PRs
+
+var prAwaitingReviewStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#f59e0b")) // Amber for awaiting review
+
+var prReviewerAssignedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#8b5cf6")) // Purple for reviewer assigned
+
+var prMergedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#a855f7")) // Purple for merged
+
+var prClosedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#6b7280")) // Gray for closed
+
+var prNoneStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#6b7280")) // Gray for no PR
 
 // repoGroup represents a group of instances for a single repository
 type repoGroup struct {
@@ -208,6 +228,18 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		)
 	}
 
+	// Get PR info display string and style
+	prInfo := i.GetPRInfo()
+	prDisplayStr := ""
+	var prStyled string
+	if prInfo != nil {
+		prDisplayStr = prInfo.DisplayString()
+		if prDisplayStr != "" {
+			prStyled = r.stylePRInfo(prInfo, descS.GetBackground())
+			prDisplayStr = " " + prDisplayStr // Add leading space for display
+		}
+	}
+
 	remainingWidth := r.width
 	remainingWidth -= runewidth.StringWidth(prefix)
 	remainingWidth -= runewidth.StringWidth(branchIcon)
@@ -219,6 +251,10 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 
 	// Use fixed width for diff stats to avoid layout issues
 	remainingWidth -= diffWidth
+
+	// Account for PR info width
+	prWidth := runewidth.StringWidth(prDisplayStr)
+	remainingWidth -= prWidth
 
 	branch := i.Branch
 	if i.Started() && hasMultipleRepos {
@@ -243,13 +279,15 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	}
 	remainingWidth -= runewidth.StringWidth(branch)
 
-	// Add spaces to fill the remaining width.
+	// Add spaces to fill the remaining width, styled with proper background
 	spaces := ""
 	if remainingWidth > 0 {
-		spaces = strings.Repeat(" ", remainingWidth)
+		spacesStyle := lipgloss.NewStyle().Background(descS.GetBackground())
+		spaces = spacesStyle.Render(strings.Repeat(" ", remainingWidth))
 	}
 
-	branchLine := fmt.Sprintf("%s %s-%s%s%s", strings.Repeat(" ", len(prefix)), branchIcon, branch, spaces, diff)
+	// Build branch line with PR info between branch and diff stats
+	branchLine := fmt.Sprintf("%s %s-%s%s%s%s", strings.Repeat(" ", len(prefix)), branchIcon, branch, prStyled, spaces, diff)
 
 	// join title and subtitle
 	text := lipgloss.JoinVertical(
@@ -259,6 +297,43 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	)
 
 	return text
+}
+
+// stylePRInfo returns the styled PR info string
+func (r *InstanceRenderer) stylePRInfo(prInfo *git.PRInfo, bg lipgloss.TerminalColor) string {
+	if prInfo == nil {
+		return ""
+	}
+
+	displayStr := prInfo.DisplayString()
+	if displayStr == "" {
+		return ""
+	}
+
+	// Add leading space
+	displayStr = " " + displayStr
+
+	var style lipgloss.Style
+	switch prInfo.State {
+	case git.PRStateNone:
+		style = prNoneStyle.Background(bg)
+	case git.PRStateMerged:
+		style = prMergedStyle.Background(bg)
+	case git.PRStateClosed:
+		style = prClosedStyle.Background(bg)
+	case git.PRStateOpen:
+		if prInfo.HasReviewRequired {
+			style = prAwaitingReviewStyle.Background(bg)
+		} else if prInfo.HasAssignee {
+			style = prReviewerAssignedStyle.Background(bg)
+		} else {
+			style = prOpenStyle.Background(bg)
+		}
+	default:
+		style = prNoneStyle.Background(bg)
+	}
+
+	return style.Render(displayStr)
 }
 
 func (l *List) String() string {

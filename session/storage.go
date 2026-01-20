@@ -24,6 +24,7 @@ type InstanceData struct {
 	PermissionMode string          `json:"permission_mode"`
 	Worktree       GitWorktreeData `json:"worktree"`
 	DiffStats      DiffStatsData   `json:"diff_stats"`
+	PRInfo         PRInfoData      `json:"pr_info,omitempty"`
 
 	// Deprecated: kept for backward compatibility when loading old data
 	DangerouslySkipPermissions bool `json:"dangerously_skip_permissions,omitempty"`
@@ -44,6 +45,14 @@ type DiffStatsData struct {
 	Added   int    `json:"added"`
 	Removed int    `json:"removed"`
 	Content string `json:"content"`
+}
+
+// PRInfoData represents the serializable data of a PRInfo
+type PRInfoData struct {
+	Number            int    `json:"number"`
+	State             string `json:"state"`
+	HasReviewRequired bool   `json:"has_review_required"`
+	HasAssignee       bool   `json:"has_assignee"`
 }
 
 // Storage handles saving and loading instances using the state interface

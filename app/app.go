@@ -185,6 +185,7 @@ func (m *home) Init() tea.Cmd {
 			return previewTickMsg{}
 		},
 		tickUpdateMetadataCmd,
+		tickUpdatePRInfoCmd,
 	)
 }
 
@@ -253,6 +254,16 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, tickUpdateMetadataCmd
+	case tickUpdatePRInfoMessage:
+		for _, instance := range m.list.GetInstances() {
+			if !instance.Started() || instance.Paused() {
+				continue
+			}
+			if err := instance.UpdatePRInfo(); err != nil {
+				log.WarningLog.Printf("could not update PR info: %v", err)
+			}
+		}
+		return m, tickUpdatePRInfoCmd
 	case tea.MouseMsg:
 		// Handle mouse wheel events for scrolling the diff/preview pane
 		if msg.Action == tea.MouseActionPress {
@@ -612,6 +623,14 @@ type instanceStartedMsg struct {
 var tickUpdateMetadataCmd = func() tea.Msg {
 	time.Sleep(500 * time.Millisecond)
 	return tickUpdateMetadataMessage{}
+}
+
+type tickUpdatePRInfoMessage struct{}
+
+// tickUpdatePRInfoCmd updates PR info every 5 minutes (slow to avoid GitHub API rate limits)
+var tickUpdatePRInfoCmd = func() tea.Msg {
+	time.Sleep(5 * time.Minute)
+	return tickUpdatePRInfoMessage{}
 }
 
 // handleError handles all errors which get bubbled up to the app. sets the error message. We return a callback tea.Cmd that returns a hideErrMsg message

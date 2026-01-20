@@ -62,6 +62,8 @@ type Instance struct {
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
+	// PRInfo stores the current PR information
+	prInfo *git.PRInfo
 
 	// The below fields are initialized upon calling Start().
 
@@ -114,6 +116,16 @@ func (i *Instance) ToInstanceData() InstanceData {
 		}
 	}
 
+	// Only include PR info if it exists
+	if i.prInfo != nil {
+		data.PRInfo = PRInfoData{
+			Number:            i.prInfo.Number,
+			State:             string(i.prInfo.State),
+			HasReviewRequired: i.prInfo.HasReviewRequired,
+			HasAssignee:       i.prInfo.HasAssignee,
+		}
+	}
+
 	return data
 }
 
@@ -159,6 +171,12 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			Added:   data.DiffStats.Added,
 			Removed: data.DiffStats.Removed,
 			Content: data.DiffStats.Content,
+		},
+		prInfo: &git.PRInfo{
+			Number:            data.PRInfo.Number,
+			State:             git.PRState(data.PRInfo.State),
+			HasReviewRequired: data.PRInfo.HasReviewRequired,
+			HasAssignee:       data.PRInfo.HasAssignee,
 		},
 	}
 
@@ -594,6 +612,33 @@ func (i *Instance) UpdateDiffStats() error {
 // GetDiffStats returns the current git diff statistics
 func (i *Instance) GetDiffStats() *git.DiffStats {
 	return i.diffStats
+}
+
+// UpdatePRInfo updates the PR information for this instance
+func (i *Instance) UpdatePRInfo() error {
+	if !i.started {
+		i.prInfo = nil
+		return nil
+	}
+
+	// Keep the previous PR info if the instance is paused
+	if i.Status == Paused {
+		return nil
+	}
+
+	info := git.FetchPRInfo(i.gitWorktree.GetRepoPath(), i.gitWorktree.GetBranchName())
+	if info.Error != nil {
+		// Don't return error - just silently skip if gh CLI is unavailable
+		return nil
+	}
+
+	i.prInfo = info
+	return nil
+}
+
+// GetPRInfo returns the current PR information
+func (i *Instance) GetPRInfo() *git.PRInfo {
+	return i.prInfo
 }
 
 // SendPrompt sends a prompt to the tmux session
