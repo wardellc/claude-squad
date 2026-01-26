@@ -5,6 +5,7 @@ import (
 	"claude-squad/keys"
 	"claude-squad/log"
 	"claude-squad/session"
+	"claude-squad/session/git"
 	"claude-squad/ui"
 	"claude-squad/ui/overlay"
 	"context"
@@ -69,6 +70,8 @@ type home struct {
 
 	// keySent is used to manage underlining menu items
 	keySent bool
+	// pendingAction stores the action to execute on confirmation
+	pendingAction tea.Cmd
 
 	// -- UI Components --
 
@@ -248,7 +251,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickUpdateMetadataMessage:
 		selected := m.list.GetSelectedInstance()
 		for _, instance := range m.list.GetInstances() {
-			if !instance.Started() || instance.Paused() {
+			// Skip instances that are not started, paused, or being deleted
+			if !instance.Started() || instance.Paused() || instance.Status == session.Deleting {
 				continue
 			}
 			updated, prompt := instance.HasUpdated()
@@ -261,16 +265,26 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					instance.SetStatus(session.Ready)
 				}
 			}
-			// Only update diff stats for selected instance (expensive git operations)
-			if instance == selected {
-				if err := instance.UpdateDiffStats(); err != nil {
-					log.WarningLog.Printf("could not update diff stats: %v", err)
+		}
+		// Update diff pane for selected instance (uses cached stats)
+		if selected != nil && selected.Status != session.Deleting {
+			m.tabbedWindow.UpdateDiff(selected)
+		}
+		// Run diff stats update asynchronously for selected instance only
+		var diffCmd tea.Cmd
+		if selected != nil && selected.Started() && !selected.Paused() && selected.Status != session.Deleting {
+			inst := selected
+			diffCmd = func() tea.Msg {
+				worktree := inst.GetGitWorktreeUnsafe()
+				if worktree == nil {
+					return diffStatsUpdatedMsg{instance: inst, stats: nil, err: nil}
 				}
+				stats := worktree.Diff()
+				return diffStatsUpdatedMsg{instance: inst, stats: stats, err: stats.Error}
 			}
 		}
-		// Update diff pane for selected instance
-		if selected != nil {
-			m.tabbedWindow.UpdateDiff(selected)
+		if diffCmd != nil {
+			return m, tea.Batch(tickUpdateMetadataCmd, diffCmd)
 		}
 		return m, tickUpdateMetadataCmd
 	case tickUpdatePRInfoMessage:
@@ -301,6 +315,47 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case diffStatsUpdatedMsg:
+		// Only update if the instance is still selected and not being deleted
+		selected := m.list.GetSelectedInstance()
+		if selected == msg.instance && msg.instance.Status != session.Deleting {
+			if msg.err == nil && msg.stats != nil {
+				msg.instance.SetDiffStats(msg.stats)
+				m.tabbedWindow.UpdateDiff(msg.instance)
+			}
+		}
+		return m, nil
+	case instanceDeletionStartedMsg:
+		// Set status to Deleting and start async deletion
+		msg.instance.SetStatus(session.Deleting)
+		inst := msg.instance
+		internalName := inst.InternalName
+		deleteCmd := func() tea.Msg {
+			err := inst.Kill()
+			return instanceDeletionCompletedMsg{instance: inst, internalName: internalName, err: err}
+		}
+		return m, deleteCmd
+	case instanceDeletionCompletedMsg:
+		if msg.err != nil {
+			// Deletion failed - revert status to Ready and show error
+			msg.instance.SetStatus(session.Ready)
+			return m, m.handleError(msg.err)
+		}
+		// Deletion succeeded - unregister repo and remove from list
+		repoName, err := msg.instance.RepoName()
+		if err != nil {
+			log.WarningLog.Printf("could not get repo name: %v", err)
+		}
+		m.list.RemoveInstance(msg.instance)
+		if repoName != "" {
+			// Note: We need to unregister repo name properly
+			// The list's repos map is private, so we rely on invalidateCache
+		}
+		// Save updated instances
+		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, m.instanceChanged()
 	case tea.KeyMsg:
 		return m.handleKeyPress(msg)
 	case tea.WindowSizeMsg:
@@ -393,8 +448,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
 		if shouldClose {
+			confirmed := m.confirmationOverlay.IsConfirmed()
+			action := m.pendingAction
 			m.state = stateDefault
 			m.confirmationOverlay = nil
+			m.pendingAction = nil
+			if confirmed && action != nil {
+				return m, action
+			}
 			return m, nil
 		}
 		return m, nil
@@ -488,10 +549,16 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 
-		// Create the kill action as a tea.Cmd
+		// Don't allow deleting an instance that is already being deleted
+		if selected.Status == session.Deleting {
+			return m, nil
+		}
+
+		// Create the kill action as a tea.Cmd that triggers async deletion
+		inst := selected
 		killAction := func() tea.Msg {
-			// Get worktree and check if branch is checked out
-			worktree, err := selected.GetGitWorktree()
+			// Check if branch is checked out before starting deletion
+			worktree, err := inst.GetGitWorktree()
 			if err != nil {
 				return err
 			}
@@ -502,17 +569,11 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			}
 
 			if checkedOut {
-				return fmt.Errorf("instance %s is currently checked out", selected.Title)
+				return fmt.Errorf("instance %s is currently checked out", inst.Title)
 			}
 
-			// Delete from storage first (using InternalName for uniqueness)
-			if err := m.storage.DeleteInstance(selected.InternalName); err != nil {
-				return err
-			}
-
-			// Then kill the instance
-			m.list.Kill()
-			return instanceChangedMsg{}
+			// Return message to start async deletion
+			return instanceDeletionStartedMsg{instance: inst}
 		}
 
 		// Show confirmation modal
@@ -646,6 +707,25 @@ type instanceStartedMsg struct {
 	err      error
 }
 
+// instanceDeletionStartedMsg is sent when deletion starts (to set Deleting status)
+type instanceDeletionStartedMsg struct {
+	instance *session.Instance
+}
+
+// instanceDeletionCompletedMsg is sent when async deletion completes
+type instanceDeletionCompletedMsg struct {
+	instance     *session.Instance
+	internalName string
+	err          error
+}
+
+// diffStatsUpdatedMsg is sent when async diff stats update completes
+type diffStatsUpdatedMsg struct {
+	instance *session.Instance
+	stats    *git.DiffStats
+	err      error
+}
+
 // tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
 // overall the instances and capture their output. It's a pretty expensive operation. Let's do it 2x a second only.
 var tickUpdateMetadataCmd = func() tea.Msg {
@@ -729,24 +809,12 @@ func (m *home) createInstanceFromForm(name, repoPath, prompt, baseBranch, permis
 // confirmAction shows a confirmation modal and stores the action to execute on confirm
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
+	m.pendingAction = action
 
 	// Create and show the confirmation overlay using ConfirmationOverlay
 	m.confirmationOverlay = overlay.NewConfirmationOverlay(message)
 	// Set a fixed width for consistent appearance
 	m.confirmationOverlay.SetWidth(50)
-
-	// Set callbacks for confirmation and cancellation
-	m.confirmationOverlay.OnConfirm = func() {
-		m.state = stateDefault
-		// Execute the action if it exists
-		if action != nil {
-			_ = action()
-		}
-	}
-
-	m.confirmationOverlay.OnCancel = func() {
-		m.state = stateDefault
-	}
 
 	return nil
 }

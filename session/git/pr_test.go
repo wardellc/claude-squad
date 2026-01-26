@@ -41,6 +41,21 @@ func TestPRInfoDisplayString(t *testing.T) {
 			expected: "#100 awaiting review",
 		},
 		{
+			name:     "open PR approved",
+			prInfo:   &PRInfo{Number: 200, State: PRStateOpen, HasAssignee: true, IsApproved: true},
+			expected: "#200 approved",
+		},
+		{
+			name:     "open PR approved takes precedence over awaiting review",
+			prInfo:   &PRInfo{Number: 300, State: PRStateOpen, HasAssignee: true, IsApproved: true, HasReviewRequired: true},
+			expected: "#300 approved",
+		},
+		{
+			name:     "approved requires assignee",
+			prInfo:   &PRInfo{Number: 400, State: PRStateOpen, IsApproved: true},
+			expected: "#400 open",
+		},
+		{
 			name:     "merged PR",
 			prInfo:   &PRInfo{Number: 50, State: PRStateMerged},
 			expected: "#50 merged",

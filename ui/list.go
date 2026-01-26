@@ -16,6 +16,7 @@ import (
 
 const readyIcon = "● "
 const pausedIcon = "⏸ "
+const deletingIcon = "⌛ "
 
 var readyStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#51bd73", Dark: "#51bd73"})
@@ -27,6 +28,9 @@ var removedLinesStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#de613e"))
 
 var pausedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#888888"})
+
+var deletingStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#888888"})
 
 var titleStyle = lipgloss.NewStyle().
@@ -67,6 +71,9 @@ var prAwaitingReviewStyle = lipgloss.NewStyle().
 
 var prReviewerAssignedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#8b5cf6")) // Purple for reviewer assigned
+
+var prApprovedStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.Color("#22c55e")) // Green for approved
 
 var prMergedStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#a855f7")) // Purple for merged
@@ -192,6 +199,8 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 		join = pausedStyle.Render(pausedIcon)
 	case session.Loading:
 		join = fmt.Sprintf("%s ", r.spinner.View())
+	case session.Deleting:
+		join = deletingStyle.Render(deletingIcon)
 	default:
 	}
 
@@ -322,7 +331,9 @@ func (r *InstanceRenderer) stylePRInfo(prInfo *git.PRInfo, bg lipgloss.TerminalC
 	case git.PRStateClosed:
 		style = prClosedStyle.Background(bg)
 	case git.PRStateOpen:
-		if prInfo.HasReviewRequired {
+		if prInfo.HasAssignee && prInfo.IsApproved {
+			style = prApprovedStyle.Background(bg)
+		} else if prInfo.HasReviewRequired {
 			style = prAwaitingReviewStyle.Background(bg)
 		} else if prInfo.HasAssignee {
 			style = prReviewerAssignedStyle.Background(bg)
@@ -439,6 +450,37 @@ func (l *List) Kill() {
 	l.items = append(l.items[:l.selectedIdx], l.items[l.selectedIdx+1:]...)
 
 	// Adjust selectedIdx if we deleted the last item.
+	if l.selectedIdx >= len(l.items) && l.selectedIdx > 0 {
+		l.selectedIdx = len(l.items) - 1
+	}
+
+	l.invalidateCache()
+}
+
+// RemoveInstance removes a specific instance from the list by pointer.
+// This is used for async deletion where we need to remove the exact instance.
+func (l *List) RemoveInstance(target *session.Instance) {
+	if len(l.items) == 0 {
+		return
+	}
+
+	// Find the index of the target instance
+	targetIdx := -1
+	for i, inst := range l.items {
+		if inst == target {
+			targetIdx = i
+			break
+		}
+	}
+
+	if targetIdx == -1 {
+		return // Instance not found
+	}
+
+	// Remove the item from the list
+	l.items = append(l.items[:targetIdx], l.items[targetIdx+1:]...)
+
+	// Adjust selectedIdx if necessary
 	if l.selectedIdx >= len(l.items) && l.selectedIdx > 0 {
 		l.selectedIdx = len(l.items) - 1
 	}

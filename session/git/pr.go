@@ -26,6 +26,8 @@ type PRInfo struct {
 	HasReviewRequired bool
 	// HasAssignee indicates if someone is assigned to the PR
 	HasAssignee bool
+	// IsApproved indicates if the PR has at least one APPROVED review
+	IsApproved bool
 	// Error holds any error that occurred during PR info fetch
 	Error error
 }
@@ -36,6 +38,7 @@ type ghPRResponse struct {
 	State     string    `json:"state"`
 	Labels    []ghLabel `json:"labels"`
 	Assignees []ghUser  `json:"assignees"`
+	Reviews   ghReviews `json:"reviews"`
 }
 
 type ghLabel struct {
@@ -44,6 +47,14 @@ type ghLabel struct {
 
 type ghUser struct {
 	Login string `json:"login"`
+}
+
+type ghReviews struct {
+	Nodes []ghReviewNode `json:"nodes"`
+}
+
+type ghReviewNode struct {
+	State string `json:"state"`
 }
 
 // DisplayString returns the formatted display string for the PR info
@@ -60,7 +71,10 @@ func (p *PRInfo) DisplayString() string {
 	case PRStateClosed:
 		return formatPRNumber(p.Number) + " closed"
 	case PRStateOpen:
-		// Priority: awaiting review > reviewer assigned > open
+		// Priority: approved > awaiting review > reviewer assigned > open
+		if p.HasAssignee && p.IsApproved {
+			return formatPRNumber(p.Number) + " approved"
+		}
 		if p.HasReviewRequired {
 			return formatPRNumber(p.Number) + " awaiting review"
 		}
@@ -111,7 +125,7 @@ func FetchPRInfo(repoPath, branchName string) *PRInfo {
 	}
 
 	// Run gh pr view to get PR info for the branch
-	cmd := exec.Command("gh", "pr", "view", branchName, "--json", "number,state,labels,assignees")
+	cmd := exec.Command("gh", "pr", "view", branchName, "--json", "number,state,labels,assignees,reviews")
 	cmd.Dir = repoPath
 
 	output, err := cmd.Output()
@@ -151,6 +165,14 @@ func FetchPRInfo(repoPath, branchName string) *PRInfo {
 
 	// Check for assignees
 	info.HasAssignee = len(response.Assignees) > 0
+
+	// Check for APPROVED reviews
+	for _, review := range response.Reviews.Nodes {
+		if strings.ToUpper(review.State) == "APPROVED" {
+			info.IsApproved = true
+			break
+		}
+	}
 
 	return info
 }

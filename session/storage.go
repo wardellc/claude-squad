@@ -53,6 +53,7 @@ type PRInfoData struct {
 	State             string `json:"state"`
 	HasReviewRequired bool   `json:"has_review_required"`
 	HasAssignee       bool   `json:"has_assignee"`
+	IsApproved        bool   `json:"is_approved"`
 }
 
 // Storage handles saving and loading instances using the state interface

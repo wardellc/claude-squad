@@ -26,6 +26,8 @@ const (
 	Loading
 	// Paused is if the instance is paused (worktree removed but branch preserved).
 	Paused
+	// Deleting is if the instance is being deleted (async deletion in progress).
+	Deleting
 )
 
 // Instance is a running instance of claude code.
@@ -123,6 +125,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 			State:             string(i.prInfo.State),
 			HasReviewRequired: i.prInfo.HasReviewRequired,
 			HasAssignee:       i.prInfo.HasAssignee,
+			IsApproved:        i.prInfo.IsApproved,
 		}
 	}
 
@@ -177,6 +180,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			State:             git.PRState(data.PRInfo.State),
 			HasReviewRequired: data.PRInfo.HasReviewRequired,
 			HasAssignee:       data.PRInfo.HasAssignee,
+			IsApproved:        data.PRInfo.IsApproved,
 		},
 	}
 
@@ -670,6 +674,17 @@ func (i *Instance) UpdateDiffStats() error {
 // GetDiffStats returns the current git diff statistics
 func (i *Instance) GetDiffStats() *git.DiffStats {
 	return i.diffStats
+}
+
+// SetDiffStats sets the git diff statistics (used for async updates)
+func (i *Instance) SetDiffStats(stats *git.DiffStats) {
+	i.diffStats = stats
+}
+
+// GetGitWorktreeUnsafe returns the git worktree without checking if started
+// This is used for async operations that need direct access
+func (i *Instance) GetGitWorktreeUnsafe() *git.GitWorktree {
+	return i.gitWorktree
 }
 
 // UpdatePRInfo updates the PR information for this instance
