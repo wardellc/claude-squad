@@ -284,10 +284,29 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	}()
 
 	if !firstTimeSetup {
-		// Reuse existing session
-		if err := tmuxSession.Restore(); err != nil {
-			setupErr = fmt.Errorf("failed to restore existing session: %w", err)
-			return setupErr
+		// Check if tmux session still exists (may not after computer restart)
+		if tmuxSession.DoesSessionExist() {
+			// Session exists, just restore PTY connection
+			if err := tmuxSession.Restore(); err != nil {
+				setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+				return setupErr
+			}
+		} else {
+			// Session was lost (e.g., computer restart), but worktree may still exist
+			worktreePath := i.gitWorktree.GetWorktreePath()
+			if _, statErr := os.Stat(worktreePath); statErr == nil {
+				// Worktree exists - create new tmux session in it
+				if err := i.tmuxSession.Start(worktreePath); err != nil {
+					setupErr = fmt.Errorf("failed to start new session for existing worktree: %w", err)
+					return setupErr
+				}
+				// Handle trust screen asynchronously for new session
+				_ = i.tmuxSession.HandleTrustScreenAsync()
+			} else {
+				// Neither tmux session nor worktree exists - mark as paused
+				i.SetStatus(Paused)
+				return nil
+			}
 		}
 	} else {
 		// Setup git worktree first
@@ -578,6 +597,45 @@ func (i *Instance) Resume() error {
 		// Handle trust screen asynchronously
 		_ = i.tmuxSession.HandleTrustScreenAsync()
 	}
+
+	i.SetStatus(Running)
+	return nil
+}
+
+// Restart closes the existing tmux session (if any) and creates a new one in the worktree.
+// This is useful when the tmux session is in a bad state or needs to be refreshed.
+func (i *Instance) Restart() error {
+	if !i.started {
+		return fmt.Errorf("cannot restart: instance not started")
+	}
+
+	if i.Status == Paused {
+		return fmt.Errorf("cannot restart: instance is paused, use resume instead")
+	}
+
+	// Get worktree path before closing session
+	worktreePath := i.gitWorktree.GetWorktreePath()
+
+	// Check if worktree exists
+	if _, err := os.Stat(worktreePath); err != nil {
+		return fmt.Errorf("cannot restart: worktree does not exist at %s", worktreePath)
+	}
+
+	// Close existing tmux session if it exists
+	if i.tmuxSession != nil && i.tmuxSession.DoesSessionExist() {
+		if err := i.tmuxSession.Close(); err != nil {
+			log.ErrorLog.Printf("failed to close existing tmux session: %v", err)
+			// Continue anyway - we want to create a new session
+		}
+	}
+
+	// Create new tmux session in the worktree
+	if err := i.tmuxSession.Start(worktreePath); err != nil {
+		return fmt.Errorf("failed to start new session: %w", err)
+	}
+
+	// Handle trust screen asynchronously
+	_ = i.tmuxSession.HandleTrustScreenAsync()
 
 	i.SetStatus(Running)
 	return nil

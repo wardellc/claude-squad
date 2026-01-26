@@ -22,6 +22,7 @@ const (
 
 	KeyCheckout
 	KeyResume
+	KeyRestart    // Restart tmux session for instance
 	KeyPrompt     // New key for entering a prompt
 	KeyHelp       // Key for showing help screen
 	KeyOpenEditor // Key for opening worktree in editor
@@ -50,6 +51,7 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"tab":        KeyTab,
 	"c":          KeyCheckout,
 	"r":          KeyResume,
+	"R":          KeyRestart,
 	"p":          KeySubmit,
 	"?":          KeyHelp,
 	"e":          KeyOpenEditor,
@@ -121,6 +123,10 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 	KeyResume: key.NewBinding(
 		key.WithKeys("r"),
 		key.WithHelp("r", "resume"),
+	),
+	KeyRestart: key.NewBinding(
+		key.WithKeys("R"),
+		key.WithHelp("R", "restart"),
 	),
 	KeyOpenEditor: key.NewBinding(
 		key.WithKeys("e"),
