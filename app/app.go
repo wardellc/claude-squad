@@ -726,10 +726,9 @@ type diffStatsUpdatedMsg struct {
 	err      error
 }
 
-// tickUpdateMetadataCmd is the callback to update the metadata of the instances every 500ms. Note that we iterate
-// overall the instances and capture their output. It's a pretty expensive operation. Let's do it 2x a second only.
+// tickUpdateMetadataCmd is the callback to update the metadata of the instances every minute.
 var tickUpdateMetadataCmd = func() tea.Msg {
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1 * time.Minute)
 	return tickUpdateMetadataMessage{}
 }
 

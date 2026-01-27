@@ -105,7 +105,7 @@ func TestDefaultConfig(t *testing.T) {
 		assert.NotNil(t, config)
 		assert.NotEmpty(t, config.DefaultProgram)
 		assert.False(t, config.AutoYes)
-		assert.Equal(t, 1000, config.DaemonPollInterval)
+		assert.Equal(t, 60000, config.DaemonPollInterval)
 		assert.Empty(t, config.BranchPrefix)
 	})
 
@@ -137,7 +137,7 @@ func TestLoadConfig(t *testing.T) {
 		assert.NotNil(t, config)
 		assert.NotEmpty(t, config.DefaultProgram)
 		assert.False(t, config.AutoYes)
-		assert.Equal(t, 1000, config.DaemonPollInterval)
+		assert.Equal(t, 60000, config.DaemonPollInterval)
 		assert.Empty(t, config.BranchPrefix)
 	})
 
@@ -197,7 +197,7 @@ func TestLoadConfig(t *testing.T) {
 		assert.NotNil(t, config)
 		assert.NotEmpty(t, config.DefaultProgram)
 		assert.False(t, config.AutoYes)                  // Default value
-		assert.Equal(t, 1000, config.DaemonPollInterval) // Default value
+		assert.Equal(t, 60000, config.DaemonPollInterval) // Default value
 	})
 }
 

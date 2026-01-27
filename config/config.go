@@ -52,6 +52,8 @@ type Config struct {
 	LastUsedRepoPath string `json:"last_used_repo_path,omitempty"`
 	// ReposDir is the default directory containing git repositories to manage
 	ReposDir string `json:"repos_dir,omitempty"`
+	// WorktreesDirectory is the directory where git worktrees are created
+	WorktreesDirectory string `json:"worktreesDirectory,omitempty"`
 }
 
 // DefaultConfig returns the default configuration
@@ -65,7 +67,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		DefaultProgram:     program,
 		AutoYes:            false,
-		DaemonPollInterval: 1000,
+		DaemonPollInterval: 60000,
 		BranchPrefix:       "",
 	}
 }

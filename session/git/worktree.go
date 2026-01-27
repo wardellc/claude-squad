@@ -9,6 +9,11 @@ import (
 )
 
 func getWorktreeDirectory() (string, error) {
+	cfg := config.LoadConfig()
+	if cfg.WorktreesDirectory != "" {
+		return cfg.WorktreesDirectory, nil
+	}
+
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
