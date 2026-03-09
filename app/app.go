@@ -20,7 +20,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const GlobalInstanceLimit = 10
+const GlobalInstanceLimit = 30
 
 // Run is the main entrypoint into the application.
 func Run(ctx context.Context, program string, autoYes bool, repos []config.RepoInfo) error {
