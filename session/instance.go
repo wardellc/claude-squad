@@ -66,6 +66,8 @@ type Instance struct {
 	diffStats *git.DiffStats
 	// PRInfo stores the current PR information
 	prInfo *git.PRInfo
+	// lastPRCheck tracks when we last fetched PR info to enforce cooldown
+	lastPRCheck time.Time
 
 	// The below fields are initialized upon calling Start().
 
@@ -175,19 +177,17 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			Removed: data.DiffStats.Removed,
 			Content: data.DiffStats.Content,
 		},
-		prInfo: &git.PRInfo{
-			Number:            data.PRInfo.Number,
-			State:             git.PRState(data.PRInfo.State),
-			HasReviewRequired: data.PRInfo.HasReviewRequired,
-			HasAssignee:       data.PRInfo.HasAssignee,
-			IsApproved:        data.PRInfo.IsApproved,
-		},
+		prInfo: prInfoFromData(data.PRInfo),
 	}
 
 	if instance.Paused() {
 		instance.started = true
 		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program, instance.PermissionMode)
 	} else {
+		// Reset to Ready before starting - the metadata tick will correct to Running
+		// if the instance is actually producing output. This avoids showing a stale
+		// Running/spinner status from the previous session.
+		instance.Status = Ready
 		if err := instance.Start(false); err != nil {
 			return nil, err
 		}
@@ -353,17 +353,16 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		}
 	}
 
-	i.SetStatus(Running)
+	// Only set Running for new instances. Restored instances keep their status
+	// until the metadata tick corrects it based on actual tmux output.
+	if firstTimeSetup {
+		i.SetStatus(Running)
+	}
 	return nil
 }
 
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
-	if !i.started {
-		// If instance was never started, just return success
-		return nil
-	}
-
 	var errs []error
 
 	// Always try to cleanup both resources, even if one fails
@@ -423,9 +422,9 @@ func (i *Instance) RefreshPreview() error {
 	return nil
 }
 
-func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
+func (i *Instance) HasUpdated() (updated bool, hasPrompt bool, hasBackgroundTask bool) {
 	if !i.started {
-		return false, false
+		return false, false, false
 	}
 	return i.tmuxSession.HasUpdated()
 }
@@ -657,6 +656,11 @@ func (i *Instance) UpdateDiffStats() error {
 		return nil
 	}
 
+	if i.gitWorktree == nil {
+		i.diffStats = nil
+		return nil
+	}
+
 	stats := i.gitWorktree.Diff()
 	if stats.Error != nil {
 		if strings.Contains(stats.Error.Error(), "base commit SHA not set") {
@@ -687,8 +691,29 @@ func (i *Instance) GetGitWorktreeUnsafe() *git.GitWorktree {
 	return i.gitWorktree
 }
 
-// UpdatePRInfo updates the PR information for this instance
-func (i *Instance) UpdatePRInfo() error {
+// prInfoFromData converts serialized PR data to a PRInfo struct.
+// Returns nil if no PR data was saved (avoids creating PRInfo with empty/invalid state).
+func prInfoFromData(data PRInfoData) *git.PRInfo {
+	state := git.PRState(data.State)
+	if state == "" {
+		return nil
+	}
+	return &git.PRInfo{
+		Number:            data.Number,
+		State:             state,
+		HasReviewRequired: data.HasReviewRequired,
+		HasAssignee:       data.HasAssignee,
+		IsApproved:        data.IsApproved,
+	}
+}
+
+// PRInfoCooldown is the minimum interval between PR info fetches for the same instance.
+const PRInfoCooldown = 30 * time.Second
+
+// UpdatePRInfo updates the PR information for this instance.
+// It enforces a cooldown to avoid excessive GitHub API calls.
+// Use force=true to bypass the cooldown (e.g., after a push).
+func (i *Instance) UpdatePRInfo(force bool) error {
 	if !i.started {
 		i.prInfo = nil
 		return nil
@@ -699,7 +724,13 @@ func (i *Instance) UpdatePRInfo() error {
 		return nil
 	}
 
+	// Enforce cooldown unless forced
+	if !force && time.Since(i.lastPRCheck) < PRInfoCooldown {
+		return nil
+	}
+
 	info := git.FetchPRInfo(i.gitWorktree.GetRepoPath(), i.gitWorktree.GetBranchName())
+	i.lastPRCheck = time.Now()
 	if info.Error != nil {
 		// Don't return error - just silently skip if gh CLI is unavailable
 		return nil

@@ -73,6 +73,11 @@ type home struct {
 	// pendingAction stores the action to execute on confirmation
 	pendingAction tea.Cmd
 
+	// digitBuffer accumulates digit keypresses for multi-digit jump (e.g. "11" for session 11)
+	digitBuffer string
+	// digitSeq is incremented each time a digit is pressed, used to ignore stale debounce timeouts
+	digitSeq int
+
 	// -- UI Components --
 
 	// list displays the list of instances
@@ -91,6 +96,11 @@ type home struct {
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// instanceFormOverlay handles the unified new instance form
 	instanceFormOverlay *overlay.InstanceFormOverlay
+
+	// -- Layout --
+
+	// windowWidth stores the last known window width for mouse event handling
+	windowWidth int
 
 	// -- Multi-repository support --
 
@@ -146,12 +156,20 @@ func newHome(ctx context.Context, program string, autoYes bool, repos []config.R
 		}
 	}
 
+	// Select the first item in display order so the list starts at the top
+	h.list.SelectFirstInDisplayOrder()
+
 	return h
 }
 
 // updateHandleWindowSizeEvent sets the sizes of the components.
 // The components will try to render inside their bounds.
+func (m *home) listWidth() int {
+	return int(float32(m.windowWidth) * 0.3)
+}
+
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
+	m.windowWidth = msg.Width
 	// List takes 30% of width, preview takes 70%
 	listWidth := int(float32(msg.Width) * 0.3)
 	tabsWidth := msg.Width - listWidth
@@ -188,7 +206,12 @@ func (m *home) Init() tea.Cmd {
 			return previewTickMsg{}
 		},
 		tickUpdateMetadataCmd,
-		tickUpdatePRInfoCmd,
+		// Do an immediate PR check for all loaded instances, then start the recurring timer
+		func() tea.Msg {
+			// Brief delay to let instances finish starting
+			time.Sleep(2 * time.Second)
+			return tickUpdatePRInfoMessage{}
+		},
 	)
 }
 
@@ -225,6 +248,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case keyupMsg:
 		m.menu.ClearKeydown()
 		return m, nil
+	case digitTimeoutMsg:
+		// Ignore stale timeouts from previous digit sequences
+		if msg.seq != m.digitSeq {
+			return m, nil
+		}
+		idx, _ := strconv.Atoi(m.digitBuffer)
+		m.digitBuffer = ""
+		if m.list.JumpToDisplayIndex(idx) {
+			return m, m.instanceChanged()
+		}
+		return m, nil
 	case instanceStartedMsg:
 		if msg.err != nil {
 			// Instance failed to start - remove it from the list
@@ -246,17 +280,23 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autoYes {
 			msg.instance.AutoYes = true
 		}
-		m.newInstanceFinalizer()
-		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+		// Trigger PR check for the newly started instance (it may already have a PR from a previous session)
+		inst := msg.instance
+		prCmd := func() tea.Msg {
+			return triggerPRCheckMsg{instance: inst, force: true}
+		}
+		return m, tea.Batch(tea.WindowSize(), m.instanceChanged(), prCmd)
 	case tickUpdateMetadataMessage:
 		selected := m.list.GetSelectedInstance()
+		var prCheckCmds []tea.Cmd
 		for _, instance := range m.list.GetInstances() {
 			// Skip instances that are not started, paused, or being deleted
 			if !instance.Started() || instance.Paused() || instance.Status == session.Deleting {
 				continue
 			}
-			updated, prompt := instance.HasUpdated()
-			if updated {
+			prevStatus := instance.Status
+			updated, prompt, bgTask := instance.HasUpdated()
+			if updated || bgTask {
 				instance.SetStatus(session.Running)
 			} else {
 				if prompt {
@@ -264,6 +304,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					instance.SetStatus(session.Ready)
 				}
+			}
+			// When an instance transitions to Ready (agent finished work),
+			// trigger a PR check - the agent may have pushed or created a PR
+			if prevStatus == session.Running && instance.Status == session.Ready {
+				inst := instance
+				prCheckCmds = append(prCheckCmds, func() tea.Msg {
+					return triggerPRCheckMsg{instance: inst, force: false}
+				})
 			}
 		}
 		// Update diff pane for selected instance (uses cached stats)
@@ -283,34 +331,89 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return diffStatsUpdatedMsg{instance: inst, stats: stats, err: stats.Error}
 			}
 		}
+		var batchCmds []tea.Cmd
+		batchCmds = append(batchCmds, tickUpdateMetadataCmd)
 		if diffCmd != nil {
-			return m, tea.Batch(tickUpdateMetadataCmd, diffCmd)
+			batchCmds = append(batchCmds, diffCmd)
 		}
-		return m, tickUpdateMetadataCmd
+		batchCmds = append(batchCmds, prCheckCmds...)
+		return m, tea.Batch(batchCmds...)
 	case tickUpdatePRInfoMessage:
+		// Fallback poll: trigger async PR checks for all running instances
+		var cmds []tea.Cmd
+		cmds = append(cmds, tickUpdatePRInfoCmd)
 		for _, instance := range m.list.GetInstances() {
 			if !instance.Started() || instance.Paused() {
 				continue
 			}
-			if err := instance.UpdatePRInfo(); err != nil {
-				log.WarningLog.Printf("could not update PR info: %v", err)
+			inst := instance
+			cmds = append(cmds, func() tea.Msg {
+				if err := inst.UpdatePRInfo(false); err != nil {
+					log.WarningLog.Printf("could not update PR info: %v", err)
+				}
+				return prInfoUpdatedMsg{instance: inst}
+			})
+		}
+		return m, tea.Batch(cmds...)
+	case triggerPRCheckMsg:
+		// Event-driven PR check for a specific instance or all
+		var cmds []tea.Cmd
+		if msg.instance != nil {
+			inst := msg.instance
+			force := msg.force
+			cmds = append(cmds, func() tea.Msg {
+				if err := inst.UpdatePRInfo(force); err != nil {
+					log.WarningLog.Printf("could not update PR info: %v", err)
+				}
+				return prInfoUpdatedMsg{instance: inst}
+			})
+		} else {
+			for _, instance := range m.list.GetInstances() {
+				if !instance.Started() || instance.Paused() {
+					continue
+				}
+				inst := instance
+				force := msg.force
+				cmds = append(cmds, func() tea.Msg {
+					if err := inst.UpdatePRInfo(force); err != nil {
+						log.WarningLog.Printf("could not update PR info: %v", err)
+					}
+					return prInfoUpdatedMsg{instance: inst}
+				})
 			}
 		}
-		return m, tickUpdatePRInfoCmd
+		return m, tea.Batch(cmds...)
+	case prInfoUpdatedMsg:
+		// PR info fetch completed - no special action needed, the instance already has the data
+		return m, nil
 	case tea.MouseMsg:
-		// Handle mouse wheel events for scrolling the diff/preview pane
+		// Handle mouse wheel events for scrolling
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				selected := m.list.GetSelectedInstance()
-				if selected == nil || selected.Status == session.Paused {
-					return m, nil
-				}
-
-				switch msg.Button {
-				case tea.MouseButtonWheelUp:
-					m.tabbedWindow.ScrollUp()
-				case tea.MouseButtonWheelDown:
-					m.tabbedWindow.ScrollDown()
+				// Determine if mouse is over the list panel (left 30% of width)
+				listWidth := m.listWidth()
+				if msg.X < listWidth {
+					// Mouse is over the list panel - move selection up/down
+					switch msg.Button {
+					case tea.MouseButtonWheelUp:
+						m.list.Up()
+						return m, m.instanceChanged()
+					case tea.MouseButtonWheelDown:
+						m.list.Down()
+						return m, m.instanceChanged()
+					}
+				} else {
+					// Mouse is over the preview/diff panel
+					selected := m.list.GetSelectedInstance()
+					if selected == nil || selected.Status == session.Paused {
+						return m, nil
+					}
+					switch msg.Button {
+					case tea.MouseButtonWheelUp:
+						m.tabbedWindow.ScrollUp()
+					case tea.MouseButtonWheelDown:
+						m.tabbedWindow.ScrollDown()
+					}
 				}
 			}
 		}
@@ -398,7 +501,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	if m.list.GetSelectedInstance() != nil && m.list.GetSelectedInstance().Paused() && name == keys.KeyEnter {
+	if selected := m.list.GetSelectedInstance(); selected != nil && selected.Paused() && name == keys.KeyEnter {
 		return nil, false
 	}
 	if name == keys.KeyShiftDown || name == keys.KeyShiftUp {
@@ -516,11 +619,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.list.Down()
 		return m, m.instanceChanged()
 	case keys.KeyJumpToInstance:
-		digit, _ := strconv.Atoi(msg.String())
-		if m.list.JumpToDisplayIndex(digit) {
-			return m, m.instanceChanged()
-		}
-		return m, nil
+		m.digitBuffer += msg.String()
+		m.digitSeq++
+		seq := m.digitSeq
+		return m, tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+			return digitTimeoutMsg{seq: seq}
+		})
 	case keys.KeyShiftUp:
 		m.tabbedWindow.ScrollUp()
 		return m, m.instanceChanged()
@@ -586,17 +690,19 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 
 		// Create the push action as a tea.Cmd
+		inst := selected
 		pushAction := func() tea.Msg {
 			// Default commit message with timestamp
-			commitMsg := fmt.Sprintf("[claudesquad] update from '%s' on %s", selected.Title, time.Now().Format(time.RFC822))
-			worktree, err := selected.GetGitWorktree()
+			commitMsg := fmt.Sprintf("[claudesquad] update from '%s' on %s", inst.Title, time.Now().Format(time.RFC822))
+			worktree, err := inst.GetGitWorktree()
 			if err != nil {
 				return err
 			}
 			if err = worktree.PushChanges(commitMsg, true); err != nil {
 				return err
 			}
-			return nil
+			// After successful push, trigger a PR check
+			return triggerPRCheckMsg{instance: inst, force: true}
 		}
 
 		// Show confirmation modal
@@ -609,13 +715,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 
 		// Show help screen before pausing
-		m.showHelpScreen(helpTypeInstanceCheckout{}, func() {
+		return m.showHelpScreen(helpTypeInstanceCheckout{}, func() tea.Cmd {
 			if err := selected.Pause(); err != nil {
-				m.handleError(err)
+				return m.handleError(err)
 			}
-			m.instanceChanged()
+			return m.instanceChanged()
 		})
-		return m, nil
 	case keys.KeyResume:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil {
@@ -643,16 +748,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 		// Show help screen before attaching
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 			ch, err := m.list.Attach()
 			if err != nil {
-				m.handleError(err)
-				return
+				return m.handleError(err)
 			}
 			<-ch
 			m.state = stateDefault
+			return nil
 		})
-		return m, nil
 	default:
 		return m, nil
 	}
@@ -672,6 +776,11 @@ func (m *home) instanceChanged() tea.Cmd {
 }
 
 type keyupMsg struct{}
+
+// digitTimeoutMsg is sent after the digit debounce period expires.
+type digitTimeoutMsg struct {
+	seq int // sequence number to ignore stale timeouts
+}
 
 // keydownCallback clears the menu option highlighting after 500ms.
 func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
@@ -726,17 +835,30 @@ type diffStatsUpdatedMsg struct {
 	err      error
 }
 
-// tickUpdateMetadataCmd is the callback to update the metadata of the instances every minute.
+// prInfoUpdatedMsg is sent when async PR info fetch completes
+type prInfoUpdatedMsg struct {
+	instance *session.Instance
+}
+
+// triggerPRCheckMsg requests a PR check for a specific instance (or all if nil)
+type triggerPRCheckMsg struct {
+	instance *session.Instance
+	force    bool
+}
+
+// tickUpdateMetadataCmd is the callback to update the metadata of the instances.
+// Runs every 5 seconds so status icons stay responsive.
 var tickUpdateMetadataCmd = func() tea.Msg {
-	time.Sleep(1 * time.Minute)
+	time.Sleep(5 * time.Second)
 	return tickUpdateMetadataMessage{}
 }
 
 type tickUpdatePRInfoMessage struct{}
 
-// tickUpdatePRInfoCmd updates PR info every 5 minutes (slow to avoid GitHub API rate limits)
+// tickUpdatePRInfoCmd updates PR info every 3 minutes as a fallback poll.
+// Most PR updates are triggered by events (push, agent finishing work).
 var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(5 * time.Minute)
+	time.Sleep(3 * time.Minute)
 	return tickUpdatePRInfoMessage{}
 }
 
@@ -833,16 +955,19 @@ func (m *home) View() string {
 	if m.state == stateNewForm {
 		if m.instanceFormOverlay == nil {
 			log.ErrorLog.Printf("instance form overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.instanceFormOverlay.Render(), mainView, true, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true, true)
 	} else if m.state == stateConfirm {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
 	}
