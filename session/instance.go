@@ -188,6 +188,10 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		instance.started = true
 		instance.tmuxSession = tmux.NewTmuxSession(instance.InternalName, instance.Program, instance.PermissionMode)
 	} else {
+		// Reset to Ready before starting - the metadata tick will correct to Running
+		// if the instance is actually producing output. This avoids showing a stale
+		// Running/spinner status from the previous session.
+		instance.Status = Ready
 		if err := instance.Start(false); err != nil {
 			return nil, err
 		}
@@ -353,7 +357,11 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 		}
 	}
 
-	i.SetStatus(Running)
+	// Only set Running for new instances. Restored instances keep their status
+	// until the metadata tick corrects it based on actual tmux output.
+	if firstTimeSetup {
+		i.SetStatus(Running)
+	}
 	return nil
 }
 
@@ -418,9 +426,9 @@ func (i *Instance) RefreshPreview() error {
 	return nil
 }
 
-func (i *Instance) HasUpdated() (updated bool, hasPrompt bool) {
+func (i *Instance) HasUpdated() (updated bool, hasPrompt bool, hasBackgroundTask bool) {
 	if !i.started {
-		return false, false
+		return false, false, false
 	}
 	return i.tmuxSession.HasUpdated()
 }
