@@ -288,13 +288,23 @@ func (t *TmuxSession) SendKeys(keys string) error {
 	return err
 }
 
-// HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
-// the tmux pane has a prompt for aider or claude code.
-func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
+// ansiRegex matches ANSI escape sequences (CSI, OSC, etc.)
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x1b]*\x1b\\|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b\[[\?]?[0-9;]*[hlm]`)
+
+// stripANSI removes ANSI escape sequences from a string so that content
+// comparisons are based on visible text only, not cursor position or styling.
+func stripANSI(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// HasUpdated checks if the tmux pane content has changed since the last tick. It also returns:
+// - hasPrompt: true if there's a permission prompt (for auto-yes)
+// - hasBackgroundTask: true if background agents/commands are running
+func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool, hasBackgroundTask bool) {
 	content, err := t.CapturePaneContent()
 	if err != nil {
 		log.ErrorLog.Printf("error capturing pane content in status monitor: %v", err)
-		return false, false
+		return false, false, false
 	}
 
 	// Only set hasPrompt for claude and aider. Use these strings to check for a prompt.
@@ -306,11 +316,31 @@ func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
 		hasPrompt = strings.Contains(content, "Yes, allow once")
 	}
 
-	if !bytes.Equal(t.monitor.hash(content), t.monitor.prevOutputHash) {
-		t.monitor.prevOutputHash = t.monitor.hash(content)
-		return true, hasPrompt
+	// Detect background agents/commands running in Claude Code.
+	// e.g. "2 background tasks still running (↓ to manage)" or "· command … (running)"
+	if t.program == ProgramClaude {
+		hasBackgroundTask = strings.Contains(content, "still running") ||
+			strings.Contains(content, "(running)")
 	}
-	return false, hasPrompt
+
+	// Strip ANSI escape sequences before hashing so that cursor position changes,
+	// color code differences, and spinner animation frames don't cause false positives.
+	stripped := stripANSI(content)
+	currentHash := t.monitor.hash(stripped)
+
+	// On the first call, just establish the baseline hash without reporting a change.
+	// This avoids false positives caused by pane resizes (WindowSizeMsg) that happen
+	// between session restore and the first metadata tick.
+	if t.monitor.prevOutputHash == nil {
+		t.monitor.prevOutputHash = currentHash
+		return false, hasPrompt, hasBackgroundTask
+	}
+
+	if !bytes.Equal(currentHash, t.monitor.prevOutputHash) {
+		t.monitor.prevOutputHash = currentHash
+		return true, hasPrompt, hasBackgroundTask
+	}
+	return false, hasPrompt, hasBackgroundTask
 }
 
 func (t *TmuxSession) Attach() (chan struct{}, error) {

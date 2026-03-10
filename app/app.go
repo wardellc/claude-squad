@@ -295,8 +295,8 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				continue
 			}
 			prevStatus := instance.Status
-			updated, prompt := instance.HasUpdated()
-			if updated {
+			updated, prompt, bgTask := instance.HasUpdated()
+			if updated || bgTask {
 				instance.SetStatus(session.Running)
 			} else {
 				if prompt {
@@ -846,9 +846,10 @@ type triggerPRCheckMsg struct {
 	force    bool
 }
 
-// tickUpdateMetadataCmd is the callback to update the metadata of the instances every minute.
+// tickUpdateMetadataCmd is the callback to update the metadata of the instances.
+// Runs every 5 seconds so status icons stay responsive.
 var tickUpdateMetadataCmd = func() tea.Msg {
-	time.Sleep(1 * time.Minute)
+	time.Sleep(5 * time.Second)
 	return tickUpdateMetadataMessage{}
 }
 
