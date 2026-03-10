@@ -34,20 +34,20 @@ var deletingStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#888888"})
 
 var titleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1, 0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
 
 var listDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1, 0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 var selectedTitleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1, 0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 var selectedDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1, 0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
@@ -176,7 +176,7 @@ func (r *InstanceRenderer) setWidth(width int) {
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
-func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool) string {
+func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool) string {
 	prefix := fmt.Sprintf(" %d. ", idx)
 	if idx >= 10 {
 		prefix = prefix[:len(prefix)-1]
@@ -266,14 +266,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	remainingWidth -= prWidth
 
 	branch := i.Branch
-	if i.Started() && hasMultipleRepos {
-		repoName, err := i.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else {
-			branch += fmt.Sprintf(" (%s)", repoName)
-		}
-	}
 	// Don't show branch if there's no space for it. Or show ellipsis if it's too long.
 	branchWidth := runewidth.StringWidth(branch)
 	if remainingWidth < 0 {
@@ -354,7 +346,6 @@ func (l *List) String() string {
 	// Write the title.
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString("\n")
 
 	// Write title line
 	// add padding of 2 because the border on list items adds some extra characters
@@ -372,7 +363,6 @@ func (l *List) String() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString("\n")
 
 	// Build grouped view and render
 	groups := l.getGroupedInstances()
@@ -388,18 +378,18 @@ func (l *List) String() string {
 			actualIdx := l.findInstanceIndex(inst)
 			isSelected := actualIdx == l.selectedIdx
 
-			b.WriteString(l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1))
+			b.WriteString(l.renderer.Render(inst, renderedIdx+1, isSelected))
 			renderedIdx++
 
 			// Add spacing between instances within a group
 			if instIdx < len(group.instances)-1 {
-				b.WriteString("\n\n")
+				b.WriteString("\n")
 			}
 		}
 
-		// Add extra spacing between groups
+		// Add spacing between groups
 		if groupIdx < len(groups)-1 {
-			b.WriteString("\n\n")
+			b.WriteString("\n")
 		}
 	}
 
