@@ -188,7 +188,12 @@ func (m *home) Init() tea.Cmd {
 			return previewTickMsg{}
 		},
 		tickUpdateMetadataCmd,
-		tickUpdatePRInfoCmd,
+		// Do an immediate PR check for all loaded instances, then start the recurring timer
+		func() tea.Msg {
+			// Brief delay to let instances finish starting
+			time.Sleep(2 * time.Second)
+			return tickUpdatePRInfoMessage{}
+		},
 	)
 }
 
@@ -247,14 +252,21 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.instance.AutoYes = true
 		}
 		m.newInstanceFinalizer()
-		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+		// Trigger PR check for the newly started instance (it may already have a PR from a previous session)
+		inst := msg.instance
+		prCmd := func() tea.Msg {
+			return triggerPRCheckMsg{instance: inst, force: true}
+		}
+		return m, tea.Batch(tea.WindowSize(), m.instanceChanged(), prCmd)
 	case tickUpdateMetadataMessage:
 		selected := m.list.GetSelectedInstance()
+		var prCheckCmds []tea.Cmd
 		for _, instance := range m.list.GetInstances() {
 			// Skip instances that are not started, paused, or being deleted
 			if !instance.Started() || instance.Paused() || instance.Status == session.Deleting {
 				continue
 			}
+			prevStatus := instance.Status
 			updated, prompt := instance.HasUpdated()
 			if updated {
 				instance.SetStatus(session.Running)
@@ -264,6 +276,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					instance.SetStatus(session.Ready)
 				}
+			}
+			// When an instance transitions to Ready (agent finished work),
+			// trigger a PR check - the agent may have pushed or created a PR
+			if prevStatus == session.Running && instance.Status == session.Ready {
+				inst := instance
+				prCheckCmds = append(prCheckCmds, func() tea.Msg {
+					return triggerPRCheckMsg{instance: inst, force: false}
+				})
 			}
 		}
 		// Update diff pane for selected instance (uses cached stats)
@@ -283,20 +303,61 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return diffStatsUpdatedMsg{instance: inst, stats: stats, err: stats.Error}
 			}
 		}
+		var batchCmds []tea.Cmd
+		batchCmds = append(batchCmds, tickUpdateMetadataCmd)
 		if diffCmd != nil {
-			return m, tea.Batch(tickUpdateMetadataCmd, diffCmd)
+			batchCmds = append(batchCmds, diffCmd)
 		}
-		return m, tickUpdateMetadataCmd
+		batchCmds = append(batchCmds, prCheckCmds...)
+		return m, tea.Batch(batchCmds...)
 	case tickUpdatePRInfoMessage:
+		// Fallback poll: trigger async PR checks for all running instances
+		var cmds []tea.Cmd
+		cmds = append(cmds, tickUpdatePRInfoCmd)
 		for _, instance := range m.list.GetInstances() {
 			if !instance.Started() || instance.Paused() {
 				continue
 			}
-			if err := instance.UpdatePRInfo(); err != nil {
-				log.WarningLog.Printf("could not update PR info: %v", err)
+			inst := instance
+			cmds = append(cmds, func() tea.Msg {
+				if err := inst.UpdatePRInfo(false); err != nil {
+					log.WarningLog.Printf("could not update PR info: %v", err)
+				}
+				return prInfoUpdatedMsg{instance: inst}
+			})
+		}
+		return m, tea.Batch(cmds...)
+	case triggerPRCheckMsg:
+		// Event-driven PR check for a specific instance or all
+		var cmds []tea.Cmd
+		if msg.instance != nil {
+			inst := msg.instance
+			force := msg.force
+			cmds = append(cmds, func() tea.Msg {
+				if err := inst.UpdatePRInfo(force); err != nil {
+					log.WarningLog.Printf("could not update PR info: %v", err)
+				}
+				return prInfoUpdatedMsg{instance: inst}
+			})
+		} else {
+			for _, instance := range m.list.GetInstances() {
+				if !instance.Started() || instance.Paused() {
+					continue
+				}
+				inst := instance
+				force := msg.force
+				cmds = append(cmds, func() tea.Msg {
+					if err := inst.UpdatePRInfo(force); err != nil {
+						log.WarningLog.Printf("could not update PR info: %v", err)
+					}
+					return prInfoUpdatedMsg{instance: inst}
+				})
 			}
 		}
-		return m, tickUpdatePRInfoCmd
+		return m, tea.Batch(cmds...)
+	case prInfoUpdatedMsg:
+		// PR info fetch completed - no special action needed, the instance already has the data
+		return m, nil
 	case tea.MouseMsg:
 		// Handle mouse wheel events for scrolling the diff/preview pane
 		if msg.Action == tea.MouseActionPress {
@@ -586,17 +647,19 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 
 		// Create the push action as a tea.Cmd
+		inst := selected
 		pushAction := func() tea.Msg {
 			// Default commit message with timestamp
-			commitMsg := fmt.Sprintf("[claudesquad] update from '%s' on %s", selected.Title, time.Now().Format(time.RFC822))
-			worktree, err := selected.GetGitWorktree()
+			commitMsg := fmt.Sprintf("[claudesquad] update from '%s' on %s", inst.Title, time.Now().Format(time.RFC822))
+			worktree, err := inst.GetGitWorktree()
 			if err != nil {
 				return err
 			}
 			if err = worktree.PushChanges(commitMsg, true); err != nil {
 				return err
 			}
-			return nil
+			// After successful push, trigger a PR check
+			return triggerPRCheckMsg{instance: inst, force: true}
 		}
 
 		// Show confirmation modal
@@ -726,6 +789,17 @@ type diffStatsUpdatedMsg struct {
 	err      error
 }
 
+// prInfoUpdatedMsg is sent when async PR info fetch completes
+type prInfoUpdatedMsg struct {
+	instance *session.Instance
+}
+
+// triggerPRCheckMsg requests a PR check for a specific instance (or all if nil)
+type triggerPRCheckMsg struct {
+	instance *session.Instance
+	force    bool
+}
+
 // tickUpdateMetadataCmd is the callback to update the metadata of the instances every minute.
 var tickUpdateMetadataCmd = func() tea.Msg {
 	time.Sleep(1 * time.Minute)
@@ -734,9 +808,10 @@ var tickUpdateMetadataCmd = func() tea.Msg {
 
 type tickUpdatePRInfoMessage struct{}
 
-// tickUpdatePRInfoCmd updates PR info every 5 minutes (slow to avoid GitHub API rate limits)
+// tickUpdatePRInfoCmd updates PR info every 3 minutes as a fallback poll.
+// Most PR updates are triggered by events (push, agent finishing work).
 var tickUpdatePRInfoCmd = func() tea.Msg {
-	time.Sleep(5 * time.Minute)
+	time.Sleep(3 * time.Minute)
 	return tickUpdatePRInfoMessage{}
 }
 
