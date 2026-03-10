@@ -97,6 +97,9 @@ type List struct {
 	renderer      *InstanceRenderer
 	autoyes       bool
 
+	// scrollOffset is the first visible line in the scrollable content area
+	scrollOffset int
+
 	// map of repo name to number of instances using it. Used to display the repo name only if there are
 	// multiple repos in play.
 	repos map[string]int
@@ -351,59 +354,133 @@ func (l *List) String() string {
 	const titleText = " Instances "
 	const autoYesText = " auto-yes "
 
-	// Write the title.
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("\n")
+	// Build the fixed header.
+	var header strings.Builder
+	header.WriteString("\n")
+	header.WriteString("\n")
 
 	// Write title line
-	// add padding of 2 because the border on list items adds some extra characters
 	titleWidth := AdjustPreviewWidth(l.width) + 2
 	if !l.autoyes {
-		b.WriteString(lipgloss.Place(
+		header.WriteString(lipgloss.Place(
 			titleWidth, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText)))
 	} else {
 		title := lipgloss.Place(
 			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText))
 		autoYes := lipgloss.Place(
 			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(autoYesText))
-		b.WriteString(lipgloss.JoinHorizontal(
+		header.WriteString(lipgloss.JoinHorizontal(
 			lipgloss.Top, title, autoYes))
 	}
 
-	b.WriteString("\n")
-	b.WriteString("\n")
+	header.WriteString("\n")
+	header.WriteString("\n")
 
-	// Build grouped view and render
+	headerStr := header.String()
+	headerLineCount := strings.Count(headerStr, "\n")
+
+	// Build the scrollable content area, tracking line positions for selected item.
+	var contentLines []string
+	selectedStart := -1
+	selectedEnd := -1
+
 	groups := l.getGroupedInstances()
 	renderedIdx := 0
 
 	for groupIdx, group := range groups {
-		// Render group header
-		b.WriteString(l.renderGroupHeader(group.repoName))
-		b.WriteString("\n")
+		// Group header
+		contentLines = append(contentLines, l.renderGroupHeader(group.repoName))
 
 		// Render instances in this group
 		for instIdx, inst := range group.instances {
 			actualIdx := l.findInstanceIndex(inst)
 			isSelected := actualIdx == l.selectedIdx
 
-			b.WriteString(l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1))
+			rendered := l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1)
+			itemLines := strings.Split(rendered, "\n")
+
+			if isSelected {
+				selectedStart = len(contentLines)
+			}
+
+			contentLines = append(contentLines, itemLines...)
+
+			if isSelected {
+				selectedEnd = len(contentLines)
+			}
+
 			renderedIdx++
 
 			// Add spacing between instances within a group
 			if instIdx < len(group.instances)-1 {
-				b.WriteString("\n\n")
+				contentLines = append(contentLines, "")
 			}
 		}
 
 		// Add extra spacing between groups
 		if groupIdx < len(groups)-1 {
-			b.WriteString("\n\n")
+			contentLines = append(contentLines, "")
 		}
 	}
 
-	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
+	// Calculate visible height for the scrollable content area
+	visibleHeight := l.height - headerLineCount
+	if visibleHeight < 1 {
+		visibleHeight = 1
+	}
+
+	// Auto-scroll to keep the selected item visible
+	if selectedStart >= 0 && selectedEnd >= 0 {
+		// If selected item is above the viewport, scroll up to show it
+		if selectedStart < l.scrollOffset {
+			l.scrollOffset = selectedStart
+		}
+		// If selected item is below the viewport, scroll down to show it
+		if selectedEnd > l.scrollOffset+visibleHeight {
+			l.scrollOffset = selectedEnd - visibleHeight
+		}
+	}
+
+	// Clamp scroll offset
+	maxScroll := len(contentLines) - visibleHeight
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if l.scrollOffset > maxScroll {
+		l.scrollOffset = maxScroll
+	}
+	if l.scrollOffset < 0 {
+		l.scrollOffset = 0
+	}
+
+	// Slice visible content lines
+	end := l.scrollOffset + visibleHeight
+	if end > len(contentLines) {
+		end = len(contentLines)
+	}
+	start := l.scrollOffset
+	if start > len(contentLines) {
+		start = len(contentLines)
+	}
+
+	visible := contentLines[start:end]
+
+	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top,
+		headerStr+strings.Join(visible, "\n"))
+}
+
+// ScrollUp scrolls the list viewport up by the given number of lines.
+func (l *List) ScrollUp(lines int) {
+	l.scrollOffset -= lines
+	if l.scrollOffset < 0 {
+		l.scrollOffset = 0
+	}
+}
+
+// ScrollDown scrolls the list viewport down by the given number of lines.
+func (l *List) ScrollDown(lines int) {
+	l.scrollOffset += lines
+	// Clamping happens in String() where we know the content height
 }
 
 // Down selects the next item in the list based on display order.
@@ -578,6 +655,15 @@ func (l *List) SetSelectedInstance(idx int) {
 		return
 	}
 	l.selectedIdx = idx
+}
+
+// SelectFirstInDisplayOrder sets the selection to the first item in display order.
+// This ensures the list starts scrolled to the top.
+func (l *List) SelectFirstInDisplayOrder() {
+	displayOrder := l.getDisplayOrder()
+	if len(displayOrder) > 0 {
+		l.selectedIdx = l.findInstanceIndex(displayOrder[0])
+	}
 }
 
 // GetInstances returns all instances in the list

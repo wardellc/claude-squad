@@ -73,6 +73,11 @@ type home struct {
 	// pendingAction stores the action to execute on confirmation
 	pendingAction tea.Cmd
 
+	// digitBuffer accumulates digit keypresses for multi-digit jump (e.g. "11" for session 11)
+	digitBuffer string
+	// digitSeq is incremented each time a digit is pressed, used to ignore stale debounce timeouts
+	digitSeq int
+
 	// -- UI Components --
 
 	// list displays the list of instances
@@ -91,6 +96,11 @@ type home struct {
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// instanceFormOverlay handles the unified new instance form
 	instanceFormOverlay *overlay.InstanceFormOverlay
+
+	// -- Layout --
+
+	// windowWidth stores the last known window width for mouse event handling
+	windowWidth int
 
 	// -- Multi-repository support --
 
@@ -146,12 +156,20 @@ func newHome(ctx context.Context, program string, autoYes bool, repos []config.R
 		}
 	}
 
+	// Select the first item in display order so the list starts at the top
+	h.list.SelectFirstInDisplayOrder()
+
 	return h
 }
 
 // updateHandleWindowSizeEvent sets the sizes of the components.
 // The components will try to render inside their bounds.
+func (m *home) listWidth() int {
+	return int(float32(m.windowWidth) * 0.3)
+}
+
 func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
+	m.windowWidth = msg.Width
 	// List takes 30% of width, preview takes 70%
 	listWidth := int(float32(msg.Width) * 0.3)
 	tabsWidth := msg.Width - listWidth
@@ -225,6 +243,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case keyupMsg:
 		m.menu.ClearKeydown()
 		return m, nil
+	case digitTimeoutMsg:
+		// Ignore stale timeouts from previous digit sequences
+		if msg.seq != m.digitSeq {
+			return m, nil
+		}
+		idx, _ := strconv.Atoi(m.digitBuffer)
+		m.digitBuffer = ""
+		if m.list.JumpToDisplayIndex(idx) {
+			return m, m.instanceChanged()
+		}
+		return m, nil
 	case instanceStartedMsg:
 		if msg.err != nil {
 			// Instance failed to start - remove it from the list
@@ -297,19 +326,33 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tickUpdatePRInfoCmd
 	case tea.MouseMsg:
-		// Handle mouse wheel events for scrolling the diff/preview pane
+		// Handle mouse wheel events for scrolling
 		if msg.Action == tea.MouseActionPress {
 			if msg.Button == tea.MouseButtonWheelDown || msg.Button == tea.MouseButtonWheelUp {
-				selected := m.list.GetSelectedInstance()
-				if selected == nil || selected.Status == session.Paused {
-					return m, nil
-				}
-
-				switch msg.Button {
-				case tea.MouseButtonWheelUp:
-					m.tabbedWindow.ScrollUp()
-				case tea.MouseButtonWheelDown:
-					m.tabbedWindow.ScrollDown()
+				// Determine if mouse is over the list panel (left 30% of width)
+				listWidth := m.listWidth()
+				if msg.X < listWidth {
+					// Mouse is over the list panel - move selection up/down
+					switch msg.Button {
+					case tea.MouseButtonWheelUp:
+						m.list.Up()
+						return m, m.instanceChanged()
+					case tea.MouseButtonWheelDown:
+						m.list.Down()
+						return m, m.instanceChanged()
+					}
+				} else {
+					// Mouse is over the preview/diff panel
+					selected := m.list.GetSelectedInstance()
+					if selected == nil || selected.Status == session.Paused {
+						return m, nil
+					}
+					switch msg.Button {
+					case tea.MouseButtonWheelUp:
+						m.tabbedWindow.ScrollUp()
+					case tea.MouseButtonWheelDown:
+						m.tabbedWindow.ScrollDown()
+					}
 				}
 			}
 		}
@@ -515,11 +558,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.list.Down()
 		return m, m.instanceChanged()
 	case keys.KeyJumpToInstance:
-		digit, _ := strconv.Atoi(msg.String())
-		if m.list.JumpToDisplayIndex(digit) {
-			return m, m.instanceChanged()
-		}
-		return m, nil
+		m.digitBuffer += msg.String()
+		m.digitSeq++
+		seq := m.digitSeq
+		return m, tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+			return digitTimeoutMsg{seq: seq}
+		})
 	case keys.KeyShiftUp:
 		m.tabbedWindow.ScrollUp()
 		return m, m.instanceChanged()
@@ -669,6 +713,11 @@ func (m *home) instanceChanged() tea.Cmd {
 }
 
 type keyupMsg struct{}
+
+// digitTimeoutMsg is sent after the digit debounce period expires.
+type digitTimeoutMsg struct {
+	seq int // sequence number to ignore stale timeouts
+}
 
 // keydownCallback clears the menu option highlighting after 500ms.
 func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
