@@ -43,7 +43,8 @@ func RunDaemon(cfg *config.Config) error {
 	stopCh := make(chan struct{})
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTimer(pollInterval)
+		ticker := time.NewTicker(pollInterval)
+		defer ticker.Stop()
 		for {
 			for _, instance := range instances {
 				// We only store started instances, but check anyway.
@@ -59,15 +60,11 @@ func RunDaemon(cfg *config.Config) error {
 				}
 			}
 
-			// Handle stop before ticker.
 			select {
 			case <-stopCh:
 				return
-			default:
+			case <-ticker.C:
 			}
-
-			<-ticker.C
-			ticker.Reset(pollInterval)
 		}
 	}()
 

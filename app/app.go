@@ -246,7 +246,6 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autoYes {
 			msg.instance.AutoYes = true
 		}
-		m.newInstanceFinalizer()
 		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
 	case tickUpdateMetadataMessage:
 		selected := m.list.GetSelectedInstance()
@@ -398,7 +397,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		return nil, false
 	}
 
-	if m.list.GetSelectedInstance() != nil && m.list.GetSelectedInstance().Paused() && name == keys.KeyEnter {
+	if selected := m.list.GetSelectedInstance(); selected != nil && selected.Paused() && name == keys.KeyEnter {
 		return nil, false
 	}
 	if name == keys.KeyShiftDown || name == keys.KeyShiftUp {
@@ -609,13 +608,12 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		}
 
 		// Show help screen before pausing
-		m.showHelpScreen(helpTypeInstanceCheckout{}, func() {
+		return m.showHelpScreen(helpTypeInstanceCheckout{}, func() tea.Cmd {
 			if err := selected.Pause(); err != nil {
-				m.handleError(err)
+				return m.handleError(err)
 			}
-			m.instanceChanged()
+			return m.instanceChanged()
 		})
-		return m, nil
 	case keys.KeyResume:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil {
@@ -643,16 +641,15 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, nil
 		}
 		// Show help screen before attaching
-		m.showHelpScreen(helpTypeInstanceAttach{}, func() {
+		return m.showHelpScreen(helpTypeInstanceAttach{}, func() tea.Cmd {
 			ch, err := m.list.Attach()
 			if err != nil {
-				m.handleError(err)
-				return
+				return m.handleError(err)
 			}
 			<-ch
 			m.state = stateDefault
+			return nil
 		})
-		return m, nil
 	default:
 		return m, nil
 	}
@@ -833,16 +830,19 @@ func (m *home) View() string {
 	if m.state == stateNewForm {
 		if m.instanceFormOverlay == nil {
 			log.ErrorLog.Printf("instance form overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.instanceFormOverlay.Render(), mainView, true, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.textOverlay.Render(), mainView, true, true)
 	} else if m.state == stateConfirm {
 		if m.confirmationOverlay == nil {
 			log.ErrorLog.Printf("confirmation overlay is nil")
+			return mainView
 		}
 		return overlay.PlaceOverlay(0, 0, m.confirmationOverlay.Render(), mainView, true, true)
 	}

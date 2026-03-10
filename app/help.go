@@ -126,8 +126,9 @@ var (
 	descStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
 )
 
-// showHelpScreen displays the help screen overlay if it hasn't been shown before
-func (m *home) showHelpScreen(helpType helpText, onDismiss func()) (tea.Model, tea.Cmd) {
+// showHelpScreen displays the help screen overlay if it hasn't been shown before.
+// onDismiss is called when the overlay is dismissed and may return a tea.Cmd to execute.
+func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.Model, tea.Cmd) {
 	// Get the flag for this help type
 	var alwaysShow bool
 	switch helpType.(type) {
@@ -156,7 +157,7 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func()) (tea.Model, t
 
 	// Skip displaying the help screen
 	if onDismiss != nil {
-		onDismiss()
+		return m, onDismiss()
 	}
 	return m, nil
 }
@@ -166,13 +167,17 @@ func (m *home) handleHelpState(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Any key press will close the help overlay
 	shouldClose := m.textOverlay.HandleKeyPress(msg)
 	if shouldClose {
+		dismissCmd := m.textOverlay.DismissCmd()
 		m.state = stateDefault
-		return m, tea.Sequence(
-			tea.WindowSize(),
-			func() tea.Msg {
-				m.menu.SetState(ui.StateDefault)
-				return nil
-			},
+		return m, tea.Batch(
+			tea.Sequence(
+				tea.WindowSize(),
+				func() tea.Msg {
+					m.menu.SetState(ui.StateDefault)
+					return nil
+				},
+			),
+			dismissCmd,
 		)
 	}
 

@@ -359,11 +359,6 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 
 // Kill terminates the instance and cleans up all resources
 func (i *Instance) Kill() error {
-	if !i.started {
-		// If instance was never started, just return success
-		return nil
-	}
-
 	var errs []error
 
 	// Always try to cleanup both resources, even if one fails
@@ -654,6 +649,11 @@ func (i *Instance) UpdateDiffStats() error {
 
 	if i.Status == Paused {
 		// Keep the previous diff stats if the instance is paused
+		return nil
+	}
+
+	if i.gitWorktree == nil {
+		i.diffStats = nil
 		return nil
 	}
 

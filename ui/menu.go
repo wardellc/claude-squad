@@ -42,8 +42,15 @@ const (
 	StatePrompt
 )
 
+// menuGroup defines a contiguous range of menu options with shared styling.
+type menuGroup struct {
+	end      int  // exclusive end index in the options slice
+	isAction bool // whether this group uses action styling
+}
+
 type Menu struct {
 	options       []keys.KeyName
+	groups        []menuGroup
 	height, width int
 	state         MenuState
 	instance      *session.Instance
@@ -105,6 +112,10 @@ func (m *Menu) updateOptions() {
 	switch m.state {
 	case StateEmpty:
 		m.options = defaultMenuOptions
+		m.groups = []menuGroup{
+			{end: 2, isAction: true},
+			{end: len(defaultMenuOptions)},
+		}
 	case StateDefault:
 		if m.instance != nil {
 			// When there is an instance, show that instance's options
@@ -112,17 +123,24 @@ func (m *Menu) updateOptions() {
 		} else {
 			// When there is no instance, show the empty state
 			m.options = defaultMenuOptions
+			m.groups = []menuGroup{
+				{end: 2, isAction: true},
+				{end: len(defaultMenuOptions)},
+			}
 		}
 	case StateNewInstance:
 		m.options = newInstanceMenuOptions
+		m.groups = nil
 	case StatePrompt:
 		m.options = promptMenuOptions
+		m.groups = nil
 	}
 }
 
 func (m *Menu) addInstanceOptions() {
 	// Instance management group
 	options := []keys.KeyName{keys.KeyNew, keys.KeyKill}
+	mgmtEnd := len(options)
 
 	// Action group
 	actionGroup := []keys.KeyName{keys.KeyEnter, keys.KeySubmit}
@@ -137,14 +155,19 @@ func (m *Menu) addInstanceOptions() {
 		actionGroup = append(actionGroup, keys.KeyShiftUp)
 	}
 
+	options = append(options, actionGroup...)
+	actionEnd := len(options)
+
 	// System group
 	systemGroup := []keys.KeyName{keys.KeyTab, keys.KeyHelp, keys.KeyQuit}
-
-	// Combine all groups
-	options = append(options, actionGroup...)
 	options = append(options, systemGroup...)
 
 	m.options = options
+	m.groups = []menuGroup{
+		{end: mgmtEnd},
+		{end: actionEnd, isAction: true},
+		{end: len(options)},
+	}
 }
 
 // SetSize sets the width of the window. The menu will be centered horizontally within this width.
@@ -155,16 +178,6 @@ func (m *Menu) SetSize(width, height int) {
 
 func (m *Menu) String() string {
 	var s strings.Builder
-
-	// Define group boundaries
-	groups := []struct {
-		start int
-		end   int
-	}{
-		{0, 2}, // Instance management group (n, d)
-		{2, 6}, // Action group (enter, submit, pause/resume, editor)
-		{7, 9}, // System group (tab, help, q)
-	}
 
 	for i, k := range m.options {
 		binding := keys.GlobalkeyBindings[k]
@@ -180,14 +193,17 @@ func (m *Menu) String() string {
 			localDescStyle = localDescStyle.Underline(true)
 		}
 
+		// Check if this item is in an action-styled group
 		var inActionGroup bool
-		switch m.state {
-		case StateEmpty:
-			// For empty state, the action group is the first group
-			inActionGroup = i <= 1
-		default:
-			// For other states, the action group is the second group
-			inActionGroup = i >= groups[1].start && i < groups[1].end
+		for _, g := range m.groups {
+			if g.isAction && i < g.end {
+				// Find the start of this group (end of previous group, or 0)
+				inActionGroup = true
+				break
+			}
+			if i < g.end {
+				break
+			}
 		}
 
 		if inActionGroup {
@@ -203,8 +219,8 @@ func (m *Menu) String() string {
 		// Add appropriate separator
 		if i != len(m.options)-1 {
 			isGroupEnd := false
-			for _, group := range groups {
-				if i == group.end-1 {
+			for _, g := range m.groups {
+				if i == g.end-1 {
 					s.WriteString(sepStyle.Render(verticalSeparator))
 					isGroupEnd = true
 					break

@@ -489,6 +489,9 @@ func (l *List) RemoveInstance(target *session.Instance) {
 }
 
 func (l *List) Attach() (chan struct{}, error) {
+	if len(l.items) == 0 || l.selectedIdx >= len(l.items) {
+		return nil, fmt.Errorf("no instance selected")
+	}
 	targetInstance := l.items[l.selectedIdx]
 	return targetInstance.Attach()
 }

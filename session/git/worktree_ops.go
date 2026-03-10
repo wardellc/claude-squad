@@ -29,8 +29,8 @@ func (g *GitWorktree) Setup() error {
 	}
 
 	// Create directory and check branch existence in parallel
-	errChan := make(chan error, 2)
-	var branchExists bool
+	errChan := make(chan error, 1)
+	branchExistsCh := make(chan bool, 1)
 
 	// Goroutine for directory creation
 	go func() {
@@ -41,18 +41,14 @@ func (g *GitWorktree) Setup() error {
 	go func() {
 		// Use git rev-parse which is faster than opening repo with go-git
 		cmd := exec.Command("git", "-C", g.repoPath, "rev-parse", "--verify", "--quiet", "refs/heads/"+g.branchName)
-		if err := cmd.Run(); err == nil {
-			branchExists = true
-		}
-		errChan <- nil
+		branchExistsCh <- cmd.Run() == nil
 	}()
 
 	// Wait for both operations
-	for i := 0; i < 2; i++ {
-		if err := <-errChan; err != nil {
-			return err
-		}
+	if err := <-errChan; err != nil {
+		return err
 	}
+	branchExists := <-branchExistsCh
 
 	if branchExists {
 		return g.setupFromExistingBranch()
