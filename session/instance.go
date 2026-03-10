@@ -66,6 +66,8 @@ type Instance struct {
 	diffStats *git.DiffStats
 	// PRInfo stores the current PR information
 	prInfo *git.PRInfo
+	// lastPRCheck tracks when we last fetched PR info to enforce cooldown
+	lastPRCheck time.Time
 
 	// The below fields are initialized upon calling Start().
 
@@ -175,13 +177,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 			Removed: data.DiffStats.Removed,
 			Content: data.DiffStats.Content,
 		},
-		prInfo: &git.PRInfo{
-			Number:            data.PRInfo.Number,
-			State:             git.PRState(data.PRInfo.State),
-			HasReviewRequired: data.PRInfo.HasReviewRequired,
-			HasAssignee:       data.PRInfo.HasAssignee,
-			IsApproved:        data.PRInfo.IsApproved,
-		},
+		prInfo: prInfoFromData(data.PRInfo),
 	}
 
 	if instance.Paused() {
@@ -687,8 +683,29 @@ func (i *Instance) GetGitWorktreeUnsafe() *git.GitWorktree {
 	return i.gitWorktree
 }
 
-// UpdatePRInfo updates the PR information for this instance
-func (i *Instance) UpdatePRInfo() error {
+// prInfoFromData converts serialized PR data to a PRInfo struct.
+// Returns nil if no PR data was saved (avoids creating PRInfo with empty/invalid state).
+func prInfoFromData(data PRInfoData) *git.PRInfo {
+	state := git.PRState(data.State)
+	if state == "" {
+		return nil
+	}
+	return &git.PRInfo{
+		Number:            data.Number,
+		State:             state,
+		HasReviewRequired: data.HasReviewRequired,
+		HasAssignee:       data.HasAssignee,
+		IsApproved:        data.IsApproved,
+	}
+}
+
+// PRInfoCooldown is the minimum interval between PR info fetches for the same instance.
+const PRInfoCooldown = 30 * time.Second
+
+// UpdatePRInfo updates the PR information for this instance.
+// It enforces a cooldown to avoid excessive GitHub API calls.
+// Use force=true to bypass the cooldown (e.g., after a push).
+func (i *Instance) UpdatePRInfo(force bool) error {
 	if !i.started {
 		i.prInfo = nil
 		return nil
@@ -699,7 +716,13 @@ func (i *Instance) UpdatePRInfo() error {
 		return nil
 	}
 
+	// Enforce cooldown unless forced
+	if !force && time.Since(i.lastPRCheck) < PRInfoCooldown {
+		return nil
+	}
+
 	info := git.FetchPRInfo(i.gitWorktree.GetRepoPath(), i.gitWorktree.GetBranchName())
+	i.lastPRCheck = time.Now()
 	if info.Error != nil {
 		// Don't return error - just silently skip if gh CLI is unavailable
 		return nil

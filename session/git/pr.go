@@ -34,11 +34,11 @@ type PRInfo struct {
 
 // ghPRResponse represents the JSON response from gh pr view
 type ghPRResponse struct {
-	Number    int       `json:"number"`
-	State     string    `json:"state"`
-	Labels    []ghLabel `json:"labels"`
-	Assignees []ghUser  `json:"assignees"`
-	Reviews   ghReviews `json:"reviews"`
+	Number    int        `json:"number"`
+	State     string     `json:"state"`
+	Labels    []ghLabel  `json:"labels"`
+	Assignees []ghUser   `json:"assignees"`
+	Reviews   []ghReview `json:"reviews"`
 }
 
 type ghLabel struct {
@@ -49,11 +49,7 @@ type ghUser struct {
 	Login string `json:"login"`
 }
 
-type ghReviews struct {
-	Nodes []ghReviewNode `json:"nodes"`
-}
-
-type ghReviewNode struct {
+type ghReview struct {
 	State string `json:"state"`
 }
 
@@ -167,7 +163,7 @@ func FetchPRInfo(repoPath, branchName string) *PRInfo {
 	info.HasAssignee = len(response.Assignees) > 0
 
 	// Check for APPROVED reviews
-	for _, review := range response.Reviews.Nodes {
+	for _, review := range response.Reviews {
 		if strings.ToUpper(review.State) == "APPROVED" {
 			info.IsApproved = true
 			break
