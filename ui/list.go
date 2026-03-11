@@ -638,6 +638,24 @@ func (l *List) Up() {
 	}
 }
 
+// GoToTop jumps to the first item in display order.
+func (l *List) GoToTop() {
+	displayOrder := l.getDisplayOrder()
+	if len(displayOrder) == 0 {
+		return
+	}
+	l.selectedIdx = l.findInstanceIndex(displayOrder[0])
+}
+
+// GoToBottom jumps to the last item in display order.
+func (l *List) GoToBottom() {
+	displayOrder := l.getDisplayOrder()
+	if len(displayOrder) == 0 {
+		return
+	}
+	l.selectedIdx = l.findInstanceIndex(displayOrder[len(displayOrder)-1])
+}
+
 // JumpToDisplayIndex jumps to the item at the given 1-indexed display position.
 // Returns true if the jump was successful, false if the index is out of bounds.
 func (l *List) JumpToDisplayIndex(idx int) bool {

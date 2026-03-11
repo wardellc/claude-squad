@@ -77,6 +77,8 @@ type home struct {
 	keySent bool
 	// pendingAction stores the action to execute on confirmation
 	pendingAction tea.Cmd
+	// lastGPress tracks the time of the last 'g' keypress for gg (go to top) vim binding
+	lastGPress time.Time
 
 	// digitBuffer accumulates digit keypresses for multi-digit jump (e.g. "12")
 	digitBuffer string
@@ -597,7 +599,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 	if selected := m.list.GetSelectedInstance(); selected != nil && selected.Paused() && name == keys.KeyEnter {
 		return nil, false
 	}
-	if name == keys.KeyShiftDown || name == keys.KeyShiftUp {
+	if name == keys.KeyShiftDown || name == keys.KeyShiftUp || name == keys.KeyGoToTop {
 		return nil, false
 	}
 
@@ -733,6 +735,18 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 	case keys.KeyDown:
 		m.list.Down()
 		return m, m.instanceChanged()
+	case keys.KeyGoToBottom:
+		m.list.GoToBottom()
+		return m, m.instanceChanged()
+	case keys.KeyGoToTop:
+		now := time.Now()
+		if now.Sub(m.lastGPress) < 300*time.Millisecond {
+			m.list.GoToTop()
+			m.lastGPress = time.Time{}
+			return m, m.instanceChanged()
+		}
+		m.lastGPress = now
+		return m, nil
 	case keys.KeyJumpToInstance:
 		m.digitBuffer += msg.String()
 		m.digitSeq++
