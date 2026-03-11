@@ -3,6 +3,7 @@ package ui
 import (
 	"claude-squad/session"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -11,6 +12,20 @@ import (
 
 var previewPaneStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
+
+// urlRegex matches http and https URLs in text. It avoids matching trailing
+// punctuation that is unlikely to be part of the URL.
+var urlRegex = regexp.MustCompile(`https?://[^\s<>\x1b"'` + "`" + `\x07\x00-\x1f]+[a-zA-Z0-9/=\-_~]`)
+
+// linkifyURLs wraps bare URLs in OSC 8 hyperlink escape sequences so that
+// terminals which support it (iTerm2, macOS Terminal, Kitty, etc.) render
+// them as clickable links.
+func linkifyURLs(s string) string {
+	return urlRegex.ReplaceAllStringFunc(s, func(u string) string {
+		// OSC 8 ; params ; uri ST  <text>  OSC 8 ; ; ST
+		return "\x1b]8;;" + u + "\x1b\\" + u + "\x1b]8;;\x1b\\"
+	})
+}
 
 type PreviewPane struct {
 	width  int
@@ -100,7 +115,7 @@ func (p *PreviewPane) UpdateContent(instance *session.Instance) error {
 			Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"}).
 			Render("ESC to exit scroll mode")
 
-		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, content, footer))
+		p.viewport.SetContent(lipgloss.JoinVertical(lipgloss.Left, linkifyURLs(content), footer))
 	} else if !p.isScrolling {
 		// In normal mode, use the usual preview
 		content, err = instance.Preview()
@@ -186,7 +201,7 @@ func (p *PreviewPane) String() string {
 		}
 	}
 
-	content := strings.Join(lines, "\n")
+	content := linkifyURLs(strings.Join(lines, "\n"))
 	rendered := previewPaneStyle.Width(p.width).Render(content)
 	return rendered
 }
@@ -209,7 +224,7 @@ func (p *PreviewPane) ScrollUp(instance *session.Instance) error {
 			Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"}).
 			Render("ESC to exit scroll mode")
 
-		contentWithFooter := lipgloss.JoinVertical(lipgloss.Left, content, footer)
+		contentWithFooter := lipgloss.JoinVertical(lipgloss.Left, linkifyURLs(content), footer)
 		p.viewport.SetContent(contentWithFooter)
 
 		// Position the viewport at the bottom initially
@@ -242,7 +257,7 @@ func (p *PreviewPane) ScrollDown(instance *session.Instance) error {
 			Foreground(lipgloss.AdaptiveColor{Light: "#808080", Dark: "#808080"}).
 			Render("ESC to exit scroll mode")
 
-		contentWithFooter := lipgloss.JoinVertical(lipgloss.Left, content, footer)
+		contentWithFooter := lipgloss.JoinVertical(lipgloss.Left, linkifyURLs(content), footer)
 		p.viewport.SetContent(contentWithFooter)
 
 		// Position the viewport at the bottom initially

@@ -404,6 +404,52 @@ func TestPreviewContentWithoutScrolling(t *testing.T) {
 	require.Contains(t, renderedString, "test", "Rendered preview should contain the test content")
 }
 
+func TestLinkifyURLs(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no URLs",
+			input:    "hello world",
+			expected: "hello world",
+		},
+		{
+			name:     "simple https URL",
+			input:    "visit https://example.com for info",
+			expected: "visit \x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\ for info",
+		},
+		{
+			name:     "URL with path",
+			input:    "see https://github.com/org/repo/pull/123",
+			expected: "see \x1b]8;;https://github.com/org/repo/pull/123\x1b\\https://github.com/org/repo/pull/123\x1b]8;;\x1b\\",
+		},
+		{
+			name:     "http URL",
+			input:    "http://localhost:3000/test",
+			expected: "\x1b]8;;http://localhost:3000/test\x1b\\http://localhost:3000/test\x1b]8;;\x1b\\",
+		},
+		{
+			name:     "URL followed by period is not included",
+			input:    "Go to https://example.com.",
+			expected: "Go to \x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\.",
+		},
+		{
+			name:     "multiple URLs on different lines",
+			input:    "https://a.com/foo\nhttps://b.com/bar",
+			expected: "\x1b]8;;https://a.com/foo\x1b\\https://a.com/foo\x1b]8;;\x1b\\\n\x1b]8;;https://b.com/bar\x1b\\https://b.com/bar\x1b]8;;\x1b\\",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := linkifyURLs(tt.input)
+			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 // Helper function for max
 func max(a, b int) int {
 	if a > b {
