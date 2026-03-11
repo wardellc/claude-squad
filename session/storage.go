@@ -22,6 +22,7 @@ type InstanceData struct {
 
 	Program        string          `json:"program"`
 	PermissionMode string          `json:"permission_mode"`
+	IsReview       bool            `json:"is_review,omitempty"`
 	Worktree       GitWorktreeData `json:"worktree"`
 	DiffStats      DiffStatsData   `json:"diff_stats"`
 	PRInfo         PRInfoData      `json:"pr_info,omitempty"`

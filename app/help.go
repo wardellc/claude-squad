@@ -47,14 +47,20 @@ func (h helpTypeGeneral) toContent() string {
 		keyStyle.Render("↵/o")+descStyle.Render("       - Attach to the selected session"),
 		keyStyle.Render("ctrl-q")+descStyle.Render("    - Detach from session"),
 		"",
+		headerStyle.Render("Review:"),
+		keyStyle.Render("R")+descStyle.Render("         - Review the selected session (restarts with /review)"),
+		keyStyle.Render("r")+descStyle.Render("         - Create a new review for a PR or branch"),
+		keyStyle.Render("T")+descStyle.Render("         - Move review session back to in-progress"),
+		"",
 		headerStyle.Render("Handoff:"),
 		keyStyle.Render("p")+descStyle.Render("         - Commit and push branch to github"),
 		keyStyle.Render("c")+descStyle.Render("         - Checkout: commit changes and pause session"),
-		keyStyle.Render("r")+descStyle.Render("         - Resume a paused session"),
+		keyStyle.Render("ctrl-r")+descStyle.Render("    - Restart the tmux session"),
 		"",
 		headerStyle.Render("Other:"),
 		keyStyle.Render("tab")+descStyle.Render("       - Switch between preview and diff tabs"),
 		keyStyle.Render("shift-↓/↑")+descStyle.Render(" - Scroll in diff view"),
+		keyStyle.Render("e")+descStyle.Render("         - Open worktree in editor"),
 		keyStyle.Render("q")+descStyle.Render("         - Quit the application"),
 	)
 	return content
@@ -101,7 +107,6 @@ func (h helpTypeInstanceCheckout) toContent() string {
 		"",
 		headerStyle.Render("Commands:"),
 		keyStyle.Render("c")+descStyle.Render(" - Checkout: commit changes locally and pause session"),
-		keyStyle.Render("r")+descStyle.Render(" - Resume a paused session"),
 	)
 	return content
 }

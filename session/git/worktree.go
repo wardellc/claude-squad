@@ -93,6 +93,40 @@ func NewGitWorktree(repoPath string, sessionName string, baseBranch string) (tre
 	}, branchName, nil
 }
 
+// NewGitWorktreeForReview creates a GitWorktree that checks out an existing branch.
+// Used for reviewing PRs/branches where we want to use the branch as-is.
+func NewGitWorktreeForReview(repoPath string, branchName string) (tree *GitWorktree, err error) {
+	// Convert repoPath to absolute path
+	absPath, err := filepath.Abs(repoPath)
+	if err != nil {
+		log.ErrorLog.Printf("git worktree path abs error, falling back to repoPath %s: %s", repoPath, err)
+		absPath = repoPath
+	}
+
+	repoPath, err = findGitRepoRoot(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	worktreeDir, err := getWorktreeDirectory()
+	if err != nil {
+		return nil, err
+	}
+
+	// Use the branch name (sanitized) for the worktree directory
+	sanitized := sanitizeBranchName(branchName)
+	worktreePath := filepath.Join(worktreeDir, sanitized)
+	worktreePath = worktreePath + "_" + fmt.Sprintf("%x", time.Now().UnixNano())
+
+	return &GitWorktree{
+		repoPath:     repoPath,
+		sessionName:  branchName,
+		branchName:   branchName,
+		worktreePath: worktreePath,
+		baseBranch:   "origin/main",
+	}, nil
+}
+
 // GetWorktreePath returns the path to the worktree
 func (g *GitWorktree) GetWorktreePath() string {
 	return g.worktreePath

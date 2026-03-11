@@ -121,6 +121,29 @@ func (g *GitWorktree) IsBranchCheckedOut() (bool, error) {
 	return strings.TrimSpace(string(output)) == g.branchName, nil
 }
 
+// FindWorktreeForBranch checks if the given branch is already checked out in
+// any worktree. Returns the worktree path if found, or "" if not.
+// This is a fast local-only operation (no network).
+func FindWorktreeForBranch(repoPath, branchName string) string {
+	cmd := exec.Command("git", "-C", repoPath, "worktree", "list", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	currentPath := ""
+	target := "refs/heads/" + branchName
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			currentPath = strings.TrimPrefix(line, "worktree ")
+		} else if strings.HasPrefix(line, "branch ") {
+			if strings.TrimPrefix(line, "branch ") == target {
+				return currentPath
+			}
+		}
+	}
+	return ""
+}
+
 // OpenBranchURL opens the branch URL in the default browser
 func (g *GitWorktree) OpenBranchURL() error {
 	// Check if GitHub CLI is available
