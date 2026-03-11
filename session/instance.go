@@ -61,6 +61,8 @@ type Instance struct {
 	PermissionMode string
 	// BaseBranch is the branch to create the worktree from
 	BaseBranch string
+	// IsReview marks this instance as a review session (shown in Review section)
+	IsReview bool
 
 	// DiffStats stores the current git diff statistics
 	diffStats *git.DiffStats
@@ -70,6 +72,8 @@ type Instance struct {
 	// The below fields are initialized upon calling Start().
 
 	started bool
+	// worktreeReady is true when Setup() has already been called externally
+	worktreeReady bool
 	// tmuxSession is the tmux session for the instance.
 	tmuxSession *tmux.TmuxSession
 	// gitWorktree is the git worktree for the instance.
@@ -95,6 +99,7 @@ func (i *Instance) ToInstanceData() InstanceData {
 		Program:        i.Program,
 		AutoYes:        i.AutoYes,
 		PermissionMode: i.PermissionMode,
+		IsReview:       i.IsReview,
 	}
 
 	// Only include worktree data if gitWorktree is initialized
@@ -162,6 +167,7 @@ func FromInstanceData(data InstanceData) (*Instance, error) {
 		UpdatedAt:      data.UpdatedAt,
 		Program:        data.Program,
 		PermissionMode: permissionMode,
+		IsReview:       data.IsReview,
 		gitWorktree: git.NewGitWorktreeFromStorage(
 			data.Worktree.RepoPath,
 			data.Worktree.WorktreePath,
@@ -267,12 +273,15 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 	i.tmuxSession = tmuxSession
 
 	if firstTimeSetup {
-		gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title, i.BaseBranch)
-		if err != nil {
-			return fmt.Errorf("failed to create git worktree: %w", err)
+		// If gitWorktree is already set (e.g., for review instances), skip creation
+		if i.gitWorktree == nil {
+			gitWorktree, branchName, err := git.NewGitWorktree(i.Path, i.Title, i.BaseBranch)
+			if err != nil {
+				return fmt.Errorf("failed to create git worktree: %w", err)
+			}
+			i.gitWorktree = gitWorktree
+			i.Branch = branchName
 		}
-		i.gitWorktree = gitWorktree
-		i.Branch = branchName
 	}
 
 	// Setup error handler to cleanup resources on any error
@@ -313,10 +322,12 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 			}
 		}
 	} else {
-		// Setup git worktree first
-		if err := i.gitWorktree.Setup(); err != nil {
-			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
-			return setupErr
+		// Setup git worktree (skip if already set up externally)
+		if !i.worktreeReady {
+			if err := i.gitWorktree.Setup(); err != nil {
+				setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
+				return setupErr
+			}
 		}
 
 		// Create new session
@@ -735,12 +746,34 @@ func (i *Instance) SendPrompt(prompt string) error {
 	return nil
 }
 
+// SendPromptCommand sends a prompt to the tmux session using tmux send-keys command.
+// This is more reliable than PTY-based SendPrompt for injecting input from outside.
+func (i *Instance) SendPromptCommand(prompt string) error {
+	if !i.started {
+		return fmt.Errorf("instance not started")
+	}
+	if i.tmuxSession == nil {
+		return fmt.Errorf("tmux session not initialized")
+	}
+	return i.tmuxSession.SendKeysCommand(prompt)
+}
+
 // PreviewFullHistory captures the entire tmux pane output including full scrollback history
 func (i *Instance) PreviewFullHistory() (string, error) {
 	if !i.started || i.Status == Paused {
 		return "", nil
 	}
 	return i.tmuxSession.CapturePaneContentWithOptions("-", "-")
+}
+
+// SetGitWorktree sets the git worktree (used for review instances with pre-created worktrees)
+func (i *Instance) SetGitWorktree(worktree *git.GitWorktree) {
+	i.gitWorktree = worktree
+}
+
+// SetWorktreeReady marks the worktree as already set up (Setup() called externally).
+func (i *Instance) SetWorktreeReady() {
+	i.worktreeReady = true
 }
 
 // SetTmuxSession sets the tmux session for testing purposes

@@ -9,6 +9,17 @@ import (
 	"strings"
 )
 
+// ErrBranchAlreadyCheckedOut is returned when a branch is already checked out
+// in another worktree. ExistingPath contains the path to that worktree.
+type ErrBranchAlreadyCheckedOut struct {
+	Branch       string
+	ExistingPath string
+}
+
+func (e *ErrBranchAlreadyCheckedOut) Error() string {
+	return fmt.Sprintf("branch %q is already checked out at %s", e.Branch, e.ExistingPath)
+}
+
 // Setup creates a new worktree for the session
 func (g *GitWorktree) Setup() error {
 	// Fetch the base branch from origin to ensure we have the latest state
@@ -69,9 +80,68 @@ func (g *GitWorktree) setupFromExistingBranch() error {
 
 	// Create a new worktree from the existing branch
 	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "is already used by worktree at") ||
+			strings.Contains(errMsg, "is already checked out at") {
+			// Extract existing worktree path from error message
+			existingPath := ""
+			for _, prefix := range []string{"is already used by worktree at '", "is already checked out at '"} {
+				if idx := strings.Index(errMsg, prefix); idx >= 0 {
+					start := idx + len(prefix)
+					if end := strings.Index(errMsg[start:], "'"); end >= 0 {
+						existingPath = errMsg[start : start+end]
+					}
+				}
+			}
+			return &ErrBranchAlreadyCheckedOut{
+				Branch:       g.branchName,
+				ExistingPath: existingPath,
+			}
+		}
 		return fmt.Errorf("failed to create worktree from branch %s: %w", g.branchName, err)
 	}
 
+	return nil
+}
+
+// ReuseExistingWorktree removes the existing worktree for this branch, then
+// re-creates a fresh worktree. Used when the user confirms they want to
+// replace an in-use worktree for a review.
+func (g *GitWorktree) ReuseExistingWorktree(existingPath string) error {
+	// Remove the existing worktree
+	if existingPath != "" {
+		_, _ = g.runGitCommand(g.repoPath, "worktree", "remove", "-f", existingPath)
+	}
+	// Prune stale worktree references
+	_ = exec.Command("git", "-C", g.repoPath, "worktree", "prune").Run()
+
+	// Now retry creating the worktree
+	if _, err := g.runGitCommand(g.repoPath, "worktree", "add", g.worktreePath, g.branchName); err != nil {
+		return fmt.Errorf("failed to create worktree from branch %s after cleanup: %w", g.branchName, err)
+	}
+	return nil
+}
+
+// PullLatest fetches the branch from origin and fast-forwards the worktree
+// to match the remote. Should be called after the worktree is set up.
+func (g *GitWorktree) PullLatest() error {
+	// Fetch the branch from origin
+	if _, err := g.runGitCommand(g.repoPath, "fetch", "origin", g.branchName); err != nil {
+		log.WarningLog.Printf("failed to fetch branch %s from origin: %v", g.branchName, err)
+		// Not fatal — branch may not exist on remote yet
+		return nil
+	}
+
+	// Check if the worktree path exists
+	if _, err := os.Stat(g.worktreePath); err != nil {
+		return nil
+	}
+
+	// Pull (ff-only) inside the worktree to pick up remote changes
+	if _, err := g.runGitCommand(g.worktreePath, "merge", "--ff-only", "origin/"+g.branchName); err != nil {
+		// If ff-only fails, the local branch has diverged — log but don't fail
+		log.WarningLog.Printf("could not fast-forward %s to origin: %v", g.branchName, err)
+	}
 	return nil
 }
 

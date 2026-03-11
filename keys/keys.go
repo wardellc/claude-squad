@@ -13,7 +13,8 @@ const (
 	KeyNew
 	KeyKill
 	KeyQuit
-	KeyReview
+	KeyReview    // Review current session (Shift+R)
+	KeyNewReview // Open new review dialog (r)
 	KeyPush
 	KeySubmit
 
@@ -22,10 +23,11 @@ const (
 
 	KeyCheckout
 	KeyResume
-	KeyRestart    // Restart tmux session for instance
+	KeyRestart    // Restart tmux session for instance (Ctrl+R)
 	KeyPrompt     // New key for entering a prompt
 	KeyHelp       // Key for showing help screen
-	KeyOpenEditor // Key for opening worktree in editor
+	KeyOpenEditor    // Key for opening worktree in editor
+	KeyMoveToProgress // Move session from Review back to In Progress (Shift+T)
 
 	// Diff keybindings
 	KeyShiftUp
@@ -50,11 +52,14 @@ var GlobalKeyStringsMap = map[string]KeyName{
 	"q":          KeyQuit,
 	"tab":        KeyTab,
 	"c":          KeyCheckout,
-	"r":          KeyResume,
-	"R":          KeyRestart,
+	"r":          KeyNewReview,
+	"R":          KeyReview,
+	"ctrl+r":     KeyRestart,
 	"p":          KeySubmit,
 	"?":          KeyHelp,
 	"e":          KeyOpenEditor,
+	"T":          KeyMoveToProgress,
+	"0":          KeyJumpToInstance,
 	"1":          KeyJumpToInstance,
 	"2":          KeyJumpToInstance,
 	"3":          KeyJumpToInstance,
@@ -124,13 +129,25 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 		key.WithKeys("r"),
 		key.WithHelp("r", "resume"),
 	),
-	KeyRestart: key.NewBinding(
+	KeyReview: key.NewBinding(
 		key.WithKeys("R"),
-		key.WithHelp("R", "restart"),
+		key.WithHelp("R", "review"),
+	),
+	KeyNewReview: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "new review"),
+	),
+	KeyRestart: key.NewBinding(
+		key.WithKeys("ctrl+r"),
+		key.WithHelp("^R", "restart"),
 	),
 	KeyOpenEditor: key.NewBinding(
 		key.WithKeys("e"),
 		key.WithHelp("e", "editor"),
+	),
+	KeyMoveToProgress: key.NewBinding(
+		key.WithKeys("T"),
+		key.WithHelp("T", "move to in-progress"),
 	),
 
 	// -- Special keybindings --
@@ -140,7 +157,7 @@ var GlobalkeyBindings = map[KeyName]key.Binding{
 		key.WithHelp("enter", "submit name"),
 	),
 	KeyJumpToInstance: key.NewBinding(
-		key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9"),
-		key.WithHelp("1-9", "jump"),
+		key.WithKeys("0", "1", "2", "3", "4", "5", "6", "7", "8", "9"),
+		key.WithHelp("0-9", "jump"),
 	),
 }

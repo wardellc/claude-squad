@@ -97,6 +97,9 @@ type List struct {
 	renderer      *InstanceRenderer
 	autoyes       bool
 
+	// scrollOffset tracks the first visible line in the list for viewport scrolling
+	scrollOffset int
+
 	// map of repo name to number of instances using it. Used to display the repo name only if there are
 	// multiple repos in play.
 	repos map[string]int
@@ -120,6 +123,11 @@ func NewList(spinner *spinner.Model, autoYes bool) *List {
 // invalidateCache marks the grouped instances cache as stale
 func (l *List) invalidateCache() {
 	l.cacheValid = false
+}
+
+// InvalidateCache marks the grouped instances cache as stale (public accessor)
+func (l *List) InvalidateCache() {
+	l.invalidateCache()
 }
 
 // ensureCacheValid rebuilds the cache if it's stale
@@ -347,63 +355,177 @@ func (r *InstanceRenderer) stylePRInfo(prInfo *git.PRInfo, bg lipgloss.TerminalC
 	return style.Render(displayStr)
 }
 
+var sectionHeaderStyle = lipgloss.NewStyle().
+	Foreground(lipgloss.AdaptiveColor{Light: "#555555", Dark: "#999999"}).
+	Bold(true)
+
 func (l *List) String() string {
 	const titleText = " Instances "
 	const autoYesText = " auto-yes "
 
-	// Write the title.
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString("\n")
+	// Build the fixed title header
+	var header strings.Builder
+	header.WriteString("\n")
+	header.WriteString("\n")
 
-	// Write title line
-	// add padding of 2 because the border on list items adds some extra characters
 	titleWidth := AdjustPreviewWidth(l.width) + 2
 	if !l.autoyes {
-		b.WriteString(lipgloss.Place(
+		header.WriteString(lipgloss.Place(
 			titleWidth, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText)))
 	} else {
 		title := lipgloss.Place(
 			titleWidth/2, 1, lipgloss.Left, lipgloss.Bottom, mainTitle.Render(titleText))
 		autoYes := lipgloss.Place(
 			titleWidth-(titleWidth/2), 1, lipgloss.Right, lipgloss.Bottom, autoYesStyle.Render(autoYesText))
-		b.WriteString(lipgloss.JoinHorizontal(
+		header.WriteString(lipgloss.JoinHorizontal(
 			lipgloss.Top, title, autoYes))
 	}
 
-	b.WriteString("\n")
-	b.WriteString("\n")
+	header.WriteString("\n")
+	header.WriteString("\n")
 
-	// Build grouped view and render
-	groups := l.getGroupedInstances()
+	headerStr := header.String()
+	headerLines := strings.Count(headerStr, "\n")
+
+	// Build the scrollable list content and track line ranges for each instance
+	var b strings.Builder
+	type instanceLineRange struct {
+		startLine int
+		endLine   int
+		inst      *session.Instance
+	}
+	var ranges []instanceLineRange
+	currentLine := 0
+
+	countLines := func(s string) int {
+		return strings.Count(s, "\n") + 1
+	}
+
+	// Split instances into in-progress and review groups
+	inProgressGroups, reviewGroups := l.splitGroupsByReview()
 	renderedIdx := 0
 
-	for groupIdx, group := range groups {
-		// Render group header
-		b.WriteString(l.renderGroupHeader(group.repoName))
-		b.WriteString("\n")
+	// Render In Progress section
+	if len(inProgressGroups) > 0 || len(reviewGroups) > 0 {
+		sectionHeader := sectionHeaderStyle.Render("  In Progress") + "\n"
+		b.WriteString(sectionHeader)
+		currentLine += countLines(sectionHeader) - 1
+	}
 
-		// Render instances in this group
-		for instIdx, inst := range group.instances {
-			actualIdx := l.findInstanceIndex(inst)
-			isSelected := actualIdx == l.selectedIdx
+	if len(inProgressGroups) > 0 {
+		for groupIdx, group := range inProgressGroups {
+			groupHeader := l.renderGroupHeader(group.repoName) + "\n"
+			b.WriteString(groupHeader)
+			currentLine += countLines(groupHeader) - 1
 
-			b.WriteString(l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1))
-			renderedIdx++
+			for instIdx, inst := range group.instances {
+				actualIdx := l.findInstanceIndex(inst)
+				isSelected := actualIdx == l.selectedIdx
 
-			// Add spacing between instances within a group
-			if instIdx < len(group.instances)-1 {
-				b.WriteString("\n\n")
+				rendered := l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1)
+				startLine := currentLine
+				b.WriteString(rendered)
+				currentLine += countLines(rendered) - 1
+
+				ranges = append(ranges, instanceLineRange{startLine: startLine, endLine: currentLine, inst: inst})
+				renderedIdx++
+
+				if instIdx < len(group.instances)-1 {
+					b.WriteString("\n\n")
+					currentLine += 2
+				}
 			}
-		}
 
-		// Add extra spacing between groups
-		if groupIdx < len(groups)-1 {
-			b.WriteString("\n\n")
+			if groupIdx < len(inProgressGroups)-1 {
+				b.WriteString("\n\n")
+				currentLine += 2
+			}
 		}
 	}
 
-	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top, b.String())
+	// Render Review section
+	if len(reviewGroups) > 0 {
+		if len(inProgressGroups) > 0 {
+			b.WriteString("\n\n")
+			currentLine += 2
+		}
+		sectionHeader := sectionHeaderStyle.Render("  Review") + "\n"
+		b.WriteString(sectionHeader)
+		currentLine += countLines(sectionHeader) - 1
+
+		for groupIdx, group := range reviewGroups {
+			groupHeader := l.renderGroupHeader(group.repoName) + "\n"
+			b.WriteString(groupHeader)
+			currentLine += countLines(groupHeader) - 1
+
+			for instIdx, inst := range group.instances {
+				actualIdx := l.findInstanceIndex(inst)
+				isSelected := actualIdx == l.selectedIdx
+
+				rendered := l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1)
+				startLine := currentLine
+				b.WriteString(rendered)
+				currentLine += countLines(rendered) - 1
+
+				ranges = append(ranges, instanceLineRange{startLine: startLine, endLine: currentLine, inst: inst})
+				renderedIdx++
+
+				if instIdx < len(group.instances)-1 {
+					b.WriteString("\n\n")
+					currentLine += 2
+				}
+			}
+
+			if groupIdx < len(reviewGroups)-1 {
+				b.WriteString("\n\n")
+				currentLine += 2
+			}
+		}
+	}
+
+	// Split content into lines for viewport scrolling
+	contentLines := strings.Split(b.String(), "\n")
+	totalLines := len(contentLines)
+	viewportHeight := l.height - headerLines
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+
+	// Find the line range of the selected instance and adjust scroll offset
+	if len(l.items) > 0 {
+		selectedInst := l.items[l.selectedIdx]
+		for _, r := range ranges {
+			if r.inst == selectedInst {
+				// Ensure the selected item is fully visible
+				if r.startLine < l.scrollOffset {
+					l.scrollOffset = r.startLine
+				}
+				if r.endLine >= l.scrollOffset+viewportHeight {
+					l.scrollOffset = r.endLine - viewportHeight + 1
+				}
+				break
+			}
+		}
+	}
+
+	// Clamp scroll offset
+	if l.scrollOffset > totalLines-viewportHeight {
+		l.scrollOffset = totalLines - viewportHeight
+	}
+	if l.scrollOffset < 0 {
+		l.scrollOffset = 0
+	}
+
+	// Extract visible lines
+	endLine := l.scrollOffset + viewportHeight
+	if endLine > totalLines {
+		endLine = totalLines
+	}
+	visibleLines := contentLines[l.scrollOffset:endLine]
+	visibleContent := strings.Join(visibleLines, "\n")
+
+	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top,
+		headerStr+visibleContent)
 }
 
 // Down selects the next item in the list based on display order.
@@ -638,12 +760,71 @@ func (l *List) getDisplayOrder() []*session.Instance {
 }
 
 // buildDisplayOrder builds the display order from groups (internal, no caching).
+// Orders in-progress instances first, then review instances, both grouped by repo.
 func (l *List) buildDisplayOrder(groups []repoGroup) []*session.Instance {
 	result := make([]*session.Instance, 0, len(l.items))
+
+	// First pass: in-progress instances
 	for _, group := range groups {
-		result = append(result, group.instances...)
+		for _, inst := range group.instances {
+			if !inst.IsReview {
+				result = append(result, inst)
+			}
+		}
 	}
+
+	// Second pass: review instances
+	for _, group := range groups {
+		for _, inst := range group.instances {
+			if inst.IsReview {
+				result = append(result, inst)
+			}
+		}
+	}
+
 	return result
+}
+
+// splitGroupsByReview splits the grouped instances into in-progress and review groups.
+// Both sections are grouped by repo with continuous numbering.
+func (l *List) splitGroupsByReview() (inProgress []repoGroup, review []repoGroup) {
+	groups := l.getGroupedInstances()
+
+	// Separate instances into in-progress and review, maintaining repo grouping
+	inProgressMap := make(map[string][]*session.Instance)
+	reviewMap := make(map[string][]*session.Instance)
+
+	for _, group := range groups {
+		for _, inst := range group.instances {
+			if inst.IsReview {
+				reviewMap[group.repoName] = append(reviewMap[group.repoName], inst)
+			} else {
+				inProgressMap[group.repoName] = append(inProgressMap[group.repoName], inst)
+			}
+		}
+	}
+
+	// Build sorted groups for in-progress
+	repoNames := make([]string, 0)
+	for name := range inProgressMap {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+	for _, name := range repoNames {
+		inProgress = append(inProgress, repoGroup{repoName: name, instances: inProgressMap[name]})
+	}
+
+	// Build sorted groups for review
+	repoNames = repoNames[:0]
+	for name := range reviewMap {
+		repoNames = append(repoNames, name)
+	}
+	sort.Strings(repoNames)
+	for _, name := range repoNames {
+		review = append(review, repoGroup{repoName: name, instances: reviewMap[name]})
+	}
+
+	return
 }
 
 // renderGroupHeader renders a visual separator header for a repository group

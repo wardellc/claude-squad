@@ -11,8 +11,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -43,6 +46,8 @@ const (
 	stateHelp
 	// stateConfirm is the state when a confirmation modal is displayed.
 	stateConfirm
+	// stateReviewForm is the state when the review form is displayed.
+	stateReviewForm
 )
 
 type home struct {
@@ -73,6 +78,13 @@ type home struct {
 	// pendingAction stores the action to execute on confirmation
 	pendingAction tea.Cmd
 
+	// digitBuffer accumulates digit keypresses for multi-digit jump (e.g. "12")
+	digitBuffer string
+	// digitSeq is incremented each time a digit is pressed, used to debounce
+	digitSeq int
+	// pendingReviewRetry stores params for retrying review creation after worktree reuse confirmation
+	pendingReviewRetry *reviewRetryParams
+
 	// -- UI Components --
 
 	// list displays the list of instances
@@ -91,6 +103,8 @@ type home struct {
 	confirmationOverlay *overlay.ConfirmationOverlay
 	// instanceFormOverlay handles the unified new instance form
 	instanceFormOverlay *overlay.InstanceFormOverlay
+	// reviewFormOverlay handles the review creation form
+	reviewFormOverlay *overlay.ReviewFormOverlay
 
 	// -- Multi-repository support --
 
@@ -170,6 +184,9 @@ func (m *home) updateHandleWindowSizeEvent(msg tea.WindowSizeMsg) {
 	if m.instanceFormOverlay != nil {
 		m.instanceFormOverlay.SetSize(int(float32(msg.Width)*0.5), int(float32(msg.Height)*0.6))
 	}
+	if m.reviewFormOverlay != nil {
+		m.reviewFormOverlay.SetSize(int(float32(msg.Width)*0.5), int(float32(msg.Height)*0.4))
+	}
 
 	previewWidth, previewHeight := m.tabbedWindow.GetPreviewSize()
 	if err := m.list.SetSessionPreviewSize(previewWidth, previewHeight); err != nil {
@@ -225,6 +242,79 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case keyupMsg:
 		m.menu.ClearKeydown()
 		return m, nil
+	case digitDebounceMsg:
+		// Only act if this debounce matches the current sequence (no newer digits arrived)
+		if msg.seq == m.digitSeq && m.digitBuffer != "" {
+			idx, _ := strconv.Atoi(m.digitBuffer)
+			m.digitBuffer = ""
+			if m.list.JumpToDisplayIndex(idx) {
+				return m, m.instanceChanged()
+			}
+		}
+		return m, nil
+	case deferredPromptSentMsg:
+		if msg.err != nil {
+			return m, m.handleError(msg.err)
+		}
+		return m, nil
+	case reviewSetupMsg:
+		if msg.err != nil {
+			return m, m.handleError(msg.err)
+		}
+		if msg.alreadyCheckedOut != nil {
+			m.pendingReviewRetry = &reviewRetryParams{
+				reviewName:   msg.reviewName,
+				branchName:   msg.branchName,
+				repoPath:     msg.repoPath,
+				target:       msg.target,
+				isPR:         msg.isPR,
+				gitWorktree:  msg.gitWorktree,
+				existingPath: msg.alreadyCheckedOut.ExistingPath,
+			}
+			confirmMsg := fmt.Sprintf(
+				"Branch %q is already checked out.\nThis will re-use the existing worktree and start a new\ntmux session. Are you happy with this?",
+				msg.branchName,
+			)
+			return m, m.confirmAction(confirmMsg, func() tea.Msg {
+				return reviewRetryConfirmedMsg{}
+			})
+		}
+		return m.startReviewInstance(msg.reviewName, msg.branchName, msg.repoPath, msg.target, msg.isPR, msg.gitWorktree)
+	case reviewRetryConfirmedMsg:
+		params := m.pendingReviewRetry
+		m.pendingReviewRetry = nil
+		if params == nil {
+			return m, nil
+		}
+		// Kill the existing instance for this branch immediately (updates the list),
+		// then run worktree reuse async so UI stays responsive.
+		reviewName := params.reviewName
+		for _, existing := range m.list.GetInstances() {
+			if existing.Branch == params.branchName && existing.Path == params.repoPath {
+				reviewName = existing.Title
+				if err := existing.Kill(); err != nil {
+					log.WarningLog.Printf("failed to kill existing instance for branch %s: %v", params.branchName, err)
+				}
+				m.list.RemoveInstance(existing)
+				break
+			}
+		}
+		params.reviewName = reviewName
+
+		retryCmd := func() tea.Msg {
+			if err := params.gitWorktree.ReuseExistingWorktree(params.existingPath); err != nil {
+				return reviewSetupMsg{err: fmt.Errorf("failed to reuse worktree: %w", err)}
+			}
+			return reviewSetupMsg{
+				reviewName:  params.reviewName,
+				branchName:  params.branchName,
+				repoPath:    params.repoPath,
+				target:      params.target,
+				isPR:        params.isPR,
+				gitWorktree: params.gitWorktree,
+			}
+		}
+		return m, retryCmd
 	case instanceStartedMsg:
 		if msg.err != nil {
 			// Instance failed to start - remove it from the list
@@ -247,7 +337,24 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.instance.AutoYes = true
 		}
 		m.newInstanceFinalizer()
-		return m, tea.Batch(tea.WindowSize(), m.instanceChanged())
+
+		// If instance has a pending prompt (e.g. /review), send it with polling for readiness
+		var promptCmd tea.Cmd
+		if msg.instance.Prompt != "" {
+			inst := msg.instance
+			prompt := inst.Prompt
+			inst.Prompt = ""
+			promptCmd = func() tea.Msg {
+				err := sendPromptWhenReady(inst, prompt, 30*time.Second)
+				return deferredPromptSentMsg{instance: inst, err: err}
+			}
+		}
+
+		cmds := []tea.Cmd{tea.WindowSize(), m.instanceChanged()}
+		if promptCmd != nil {
+			cmds = append(cmds, promptCmd)
+		}
+		return m, tea.Batch(cmds...)
 	case tickUpdateMetadataMessage:
 		selected := m.list.GetSelectedInstance()
 		for _, instance := range m.list.GetInstances() {
@@ -389,7 +496,7 @@ func (m *home) handleMenuHighlighting(msg tea.KeyMsg) (cmd tea.Cmd, returnEarly 
 		m.keySent = false
 		return nil, false
 	}
-	if m.state == stateHelp || m.state == stateConfirm || m.state == stateNewForm {
+	if m.state == stateHelp || m.state == stateConfirm || m.state == stateNewForm || m.state == stateReviewForm {
 		return nil, false
 	}
 	// If it's in the global keymap, we should try to highlight it.
@@ -444,6 +551,27 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m, nil
 	}
 
+	// Handle review form state
+	if m.state == stateReviewForm {
+		shouldClose := m.reviewFormOverlay.HandleKeyPress(msg)
+		if shouldClose {
+			if m.reviewFormOverlay.IsSubmitted() {
+				target := m.reviewFormOverlay.GetTarget()
+				repo := m.reviewFormOverlay.GetSelectedRepo()
+				isPR := m.reviewFormOverlay.IsPRNumber()
+
+				m.reviewFormOverlay = nil
+				return m.createReviewInstance(target, repo.Path, isPR)
+			}
+			// Canceled
+			m.reviewFormOverlay = nil
+			m.state = stateDefault
+			m.menu.SetState(ui.StateDefault)
+			return m, nil
+		}
+		return m, nil
+	}
+
 	// Handle confirmation state
 	if m.state == stateConfirm {
 		shouldClose := m.confirmationOverlay.HandleKeyPress(msg)
@@ -456,7 +584,8 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			if confirmed && action != nil {
 				return m, action
 			}
-			return m, nil
+			m.pendingReviewRetry = nil
+			return m, tea.WindowSize()
 		}
 		return m, nil
 	}
@@ -516,11 +645,14 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		m.list.Down()
 		return m, m.instanceChanged()
 	case keys.KeyJumpToInstance:
-		digit, _ := strconv.Atoi(msg.String())
-		if m.list.JumpToDisplayIndex(digit) {
-			return m, m.instanceChanged()
+		m.digitBuffer += msg.String()
+		m.digitSeq++
+		seq := m.digitSeq
+		debounceCmd := func() tea.Msg {
+			time.Sleep(300 * time.Millisecond)
+			return digitDebounceMsg{seq: seq}
 		}
-		return m, nil
+		return m, debounceCmd
 	case keys.KeyShiftUp:
 		m.tabbedWindow.ScrollUp()
 		return m, m.instanceChanged()
@@ -625,6 +757,71 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 			return m, m.handleError(err)
 		}
 		return m, tea.WindowSize()
+	case keys.KeyReview:
+		selected := m.list.GetSelectedInstance()
+		if selected == nil {
+			return m, nil
+		}
+		if selected.Paused() {
+			return m, m.handleError(fmt.Errorf("cannot review: instance is paused"))
+		}
+		// Restart the session and send /review via app-level polling
+		if err := selected.Restart(); err != nil {
+			return m, m.handleError(err)
+		}
+		selected.IsReview = true
+		m.list.InvalidateCache()
+		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+			return m, m.handleError(err)
+		}
+		inst := selected
+		promptCmd := func() tea.Msg {
+			// Try to find the PR number for this branch
+			reviewPrompt := "/review"
+			if inst.Branch != "" && inst.Path != "" {
+				cmd := exec.Command("gh", "pr", "list", "--head", inst.Branch, "--json", "number", "--jq", ".[0].number")
+				cmd.Dir = inst.Path
+				if output, err := cmd.Output(); err == nil {
+					if prNum := strings.TrimSpace(string(output)); prNum != "" {
+						reviewPrompt = fmt.Sprintf("/review %s", prNum)
+					}
+				}
+			}
+			err := sendPromptWhenReady(inst, reviewPrompt, 30*time.Second)
+			return deferredPromptSentMsg{instance: inst, err: err}
+		}
+		return m, tea.Batch(tea.WindowSize(), m.instanceChanged(), promptCmd)
+	case keys.KeyMoveToProgress:
+		selected := m.list.GetSelectedInstance()
+		if selected == nil {
+			return m, nil
+		}
+		if !selected.IsReview {
+			return m, nil
+		}
+		selected.IsReview = false
+		m.list.InvalidateCache()
+		if err := m.storage.SaveInstances(m.list.GetInstances()); err != nil {
+			return m, m.handleError(err)
+		}
+		return m, tea.WindowSize()
+	case keys.KeyNewReview:
+		if m.list.NumInstances() >= GlobalInstanceLimit {
+			return m, m.handleError(
+				fmt.Errorf("you can't create more than %d instances", GlobalInstanceLimit))
+		}
+
+		var defaultRepo config.RepoInfo
+		var repos []config.RepoInfo
+		if len(m.repos) > 0 {
+			repos = m.appConfig.GetReposSortedByUsage(m.repos)
+			defaultRepo = m.appConfig.GetMostRecentRepo(repos)
+		}
+
+		m.reviewFormOverlay = overlay.NewReviewFormOverlay(repos, defaultRepo)
+		m.state = stateReviewForm
+		m.menu.SetState(ui.StateNewInstance)
+		return m, tea.WindowSize()
 	case keys.KeyRestart:
 		selected := m.list.GetSelectedInstance()
 		if selected == nil {
@@ -673,6 +870,11 @@ func (m *home) instanceChanged() tea.Cmd {
 
 type keyupMsg struct{}
 
+// digitDebounceMsg fires after a short delay to commit the buffered digit input
+type digitDebounceMsg struct {
+	seq int // the digitSeq at time of scheduling; ignore if stale
+}
+
 // keydownCallback clears the menu option highlighting after 500ms.
 func (m *home) keydownCallback(name keys.KeyName) tea.Cmd {
 	m.menu.Keydown(name)
@@ -717,6 +919,12 @@ type instanceDeletionCompletedMsg struct {
 	instance     *session.Instance
 	internalName string
 	err          error
+}
+
+// deferredPromptSentMsg is sent when a deferred prompt has been sent to an instance
+type deferredPromptSentMsg struct {
+	instance *session.Instance
+	err      error
 }
 
 // diffStatsUpdatedMsg is sent when async diff stats update completes
@@ -805,6 +1013,245 @@ func (m *home) createInstanceFromForm(name, repoPath, prompt, baseBranch, permis
 	return m, tea.Batch(tea.WindowSize(), startCmd)
 }
 
+// reviewSetupMsg is the result of the async review setup (PR resolution, fetch, worktree creation).
+type reviewSetupMsg struct {
+	reviewName  string
+	branchName  string
+	repoPath    string
+	target      string // original PR number or branch name
+	isPR        bool
+	gitWorktree *git.GitWorktree
+	err         error
+	// Set when the branch is already checked out in another worktree
+	alreadyCheckedOut *git.ErrBranchAlreadyCheckedOut
+}
+
+// reviewRetryParams stores the parameters needed to retry review creation
+// after the user confirms reusing an existing worktree.
+type reviewRetryParams struct {
+	reviewName   string
+	branchName   string
+	repoPath     string
+	target       string
+	isPR         bool
+	gitWorktree  *git.GitWorktree
+	existingPath string
+}
+
+// reviewRetryConfirmedMsg is sent when user confirms reusing an existing worktree
+type reviewRetryConfirmedMsg struct{}
+
+// createReviewInstance kicks off async PR resolution, fetch, and worktree setup.
+func (m *home) createReviewInstance(target, repoPath string, isPR bool) (tea.Model, tea.Cmd) {
+	if repoPath == "" {
+		repoPath = "."
+	}
+
+	m.state = stateDefault
+	m.menu.SetState(ui.StateDefault)
+
+	setupCmd := func() tea.Msg {
+		return m.doReviewSetup(target, repoPath, isPR)
+	}
+	return m, setupCmd
+}
+
+// doReviewSetup runs in a background goroutine: resolves PR, fetches, creates worktree.
+func (m *home) doReviewSetup(target, repoPath string, isPR bool) reviewSetupMsg {
+	branchName := target
+	if isPR {
+		cmd := exec.Command("gh", "pr", "view", target, "--json", "headRefName", "--jq", ".headRefName")
+		cmd.Dir = repoPath
+		output, err := cmd.Output()
+		if err != nil {
+			return reviewSetupMsg{err: fmt.Errorf("failed to get PR #%s branch: %w", target, err)}
+		}
+		branchName = strings.TrimSpace(string(output))
+		if branchName == "" {
+			return reviewSetupMsg{err: fmt.Errorf("could not determine branch for PR #%s", target)}
+		}
+	} else {
+		// Branch name was entered — try to find the associated PR number
+		cmd := exec.Command("gh", "pr", "list", "--head", branchName, "--json", "number", "--jq", ".[0].number")
+		cmd.Dir = repoPath
+		if output, err := cmd.Output(); err == nil {
+			if prNum := strings.TrimSpace(string(output)); prNum != "" {
+				target = prNum
+				isPR = true
+			}
+		}
+	}
+
+	reviewName := fmt.Sprintf("review-%s", target)
+
+	// Fast local check: is this branch already checked out in a worktree?
+	if existingPath := git.FindWorktreeForBranch(repoPath, branchName); existingPath != "" {
+		// Create the GitWorktree object (no I/O) so retry can reuse it
+		gitWorktree, err := git.NewGitWorktreeForReview(repoPath, branchName)
+		if err != nil {
+			return reviewSetupMsg{err: fmt.Errorf("failed to create review worktree: %w", err)}
+		}
+		return reviewSetupMsg{
+			reviewName:  reviewName,
+			branchName:  branchName,
+			repoPath:    repoPath,
+			target:      target,
+			isPR:        isPR,
+			gitWorktree: gitWorktree,
+			alreadyCheckedOut: &git.ErrBranchAlreadyCheckedOut{
+				Branch:       branchName,
+				ExistingPath: existingPath,
+			},
+		}
+	}
+
+	// Fetch the review branch from origin
+	fetchCmd := exec.Command("git", "-C", repoPath, "fetch", "origin", branchName)
+	if fetchOut, fetchErr := fetchCmd.CombinedOutput(); fetchErr != nil {
+		log.WarningLog.Printf("failed to fetch branch %s: %s (%v)", branchName, fetchOut, fetchErr)
+	}
+
+	gitWorktree, err := git.NewGitWorktreeForReview(repoPath, branchName)
+	if err != nil {
+		return reviewSetupMsg{err: fmt.Errorf("failed to create review worktree: %w", err)}
+	}
+
+	if err := gitWorktree.Setup(); err != nil {
+		return reviewSetupMsg{err: fmt.Errorf("failed to setup review worktree: %w", err)}
+	}
+
+	// Pull latest from remote
+	if err := gitWorktree.PullLatest(); err != nil {
+		log.WarningLog.Printf("failed to pull latest for review: %v", err)
+	}
+
+	return reviewSetupMsg{
+		reviewName:  reviewName,
+		branchName:  branchName,
+		repoPath:    repoPath,
+		target:      target,
+		isPR:        isPR,
+		gitWorktree: gitWorktree,
+	}
+}
+
+// startReviewInstance creates and starts a review instance with an already-set-up worktree.
+func (m *home) startReviewInstance(reviewName, branchName, repoPath, target string, isPR bool, gitWorktree *git.GitWorktree) (tea.Model, tea.Cmd) {
+	repoName := filepath.Base(repoPath)
+
+	// Find and remove any existing instance on the same branch in this repo.
+	// Preserve the original title if we're replacing an existing session.
+	for _, existing := range m.list.GetInstances() {
+		if existing.Branch == branchName && existing.Path == repoPath {
+			reviewName = existing.Title
+			if err := existing.Kill(); err != nil {
+				log.WarningLog.Printf("failed to kill existing instance for branch %s: %v", branchName, err)
+			}
+			m.list.RemoveInstance(existing)
+			break
+		}
+	}
+
+	instance, err := session.NewInstance(session.InstanceOptions{
+		Title:          reviewName,
+		Path:           repoPath,
+		Program:        m.program,
+		PermissionMode: "bypass",
+	})
+	if err != nil {
+		return m, m.handleError(err)
+	}
+
+	m.selectedRepoPath = repoPath
+	instance.IsReview = true
+	instance.Branch = branchName
+
+	instance.InternalName = fmt.Sprintf("%s_%s", repoName, reviewName)
+
+	instance.SetGitWorktree(gitWorktree)
+	instance.SetWorktreeReady()
+
+	m.newInstanceFinalizer = m.list.AddInstance(instance)
+	m.list.SetSelectedInstance(m.list.NumInstances() - 1)
+	instance.SetStatus(session.Loading)
+
+	if repoPath != "" && repoPath != "." {
+		if err := m.appConfig.SetLastUsedRepo(repoPath); err != nil {
+			log.WarningLog.Printf("failed to set last used repo: %v", err)
+		}
+	}
+
+	m.state = stateDefault
+	m.menu.SetState(ui.StateDefault)
+
+	// Build the review prompt: /review accepts PR numbers
+	reviewPrompt := "/review"
+	if isPR && target != "" {
+		reviewPrompt = fmt.Sprintf("/review %s", target)
+	}
+
+	startCmd := func() tea.Msg {
+		err := instance.Start(true)
+		instance.Prompt = reviewPrompt
+		return instanceStartedMsg{instance: instance, err: err}
+	}
+
+	return m, tea.Batch(tea.WindowSize(), startCmd)
+}
+
+// ansiRegex strips ANSI escape sequences from strings.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// stripAnsi removes ANSI escape sequences from a string.
+func stripAnsi(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// sendPromptWhenReady polls the instance's tmux pane for Claude's input prompt, then sends the prompt
+// using tmux send-keys command (more reliable than PTY writes for deferred input).
+func sendPromptWhenReady(inst *session.Instance, prompt string, timeout time.Duration) error {
+	start := time.Now()
+	sleep := 500 * time.Millisecond
+
+	for time.Since(start) < timeout {
+		time.Sleep(sleep)
+
+		// Use RefreshPreview + Preview to check current pane content
+		if err := inst.RefreshPreview(); err != nil {
+			continue
+		}
+		preview, err := inst.Preview()
+		if err != nil || preview == "" {
+			continue
+		}
+
+		// Strip ANSI escape codes for reliable text matching
+		clean := stripAnsi(preview)
+
+		// Check for Claude's input prompt indicators.
+		// Modern Claude Code UI shows a status bar with "Model:" when ready,
+		// rather than a traditional ">" prompt.
+		if strings.Contains(clean, "What would you like to do?") ||
+			strings.Contains(clean, "\n> ") ||
+			strings.HasSuffix(strings.TrimRight(clean, " \n\t"), ">") ||
+			(strings.Contains(clean, "Model:") && strings.Contains(clean, "Ctx:")) {
+			// Claude is ready - send via tmux send-keys command
+			time.Sleep(300 * time.Millisecond)
+			return inst.SendPromptCommand(prompt)
+		}
+
+		// Exponential backoff capped at 2s
+		sleep = time.Duration(float64(sleep) * 1.3)
+		if sleep > 2*time.Second {
+			sleep = 2 * time.Second
+		}
+	}
+
+	// Timeout - try sending anyway as a last resort
+	log.ErrorLog.Printf("sendPromptWhenReady timed out after %v for %q", timeout, inst.Title)
+	return inst.SendPromptCommand(prompt)
+}
+
 // confirmAction shows a confirmation modal and stores the action to execute on confirm
 func (m *home) confirmAction(message string, action tea.Cmd) tea.Cmd {
 	m.state = stateConfirm
@@ -835,6 +1282,11 @@ func (m *home) View() string {
 			log.ErrorLog.Printf("instance form overlay is nil")
 		}
 		return overlay.PlaceOverlay(0, 0, m.instanceFormOverlay.Render(), mainView, true, true)
+	} else if m.state == stateReviewForm {
+		if m.reviewFormOverlay == nil {
+			log.ErrorLog.Printf("review form overlay is nil")
+		}
+		return overlay.PlaceOverlay(0, 0, m.reviewFormOverlay.Render(), mainView, true, true)
 	} else if m.state == stateHelp {
 		if m.textOverlay == nil {
 			log.ErrorLog.Printf("text overlay is nil")

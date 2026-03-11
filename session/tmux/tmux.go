@@ -288,6 +288,14 @@ func (t *TmuxSession) SendKeys(keys string) error {
 	return err
 }
 
+// SendKeysCommand sends keys to the tmux session using the `tmux send-keys` command.
+// This is more reliable than writing to the PTY directly, especially for injecting
+// input from outside the session (e.g. deferred prompts).
+func (t *TmuxSession) SendKeysCommand(text string) error {
+	cmd := exec.Command("tmux", "send-keys", "-t", t.sanitizedName, text, "Enter")
+	return t.cmdExec.Run(cmd)
+}
+
 // HasUpdated checks if the tmux pane content has changed since the last tick. It also returns true if
 // the tmux pane has a prompt for aider or claude code.
 func (t *TmuxSession) HasUpdated() (updated bool, hasPrompt bool) {
