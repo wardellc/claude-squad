@@ -34,20 +34,20 @@ var deletingStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.AdaptiveColor{Light: "#888888", Dark: "#888888"})
 
 var titleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1, 0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#dddddd"})
 
 var listDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1, 0, 1).
 	Foreground(lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"})
 
 var selectedTitleStyle = lipgloss.NewStyle().
-	Padding(1, 1, 0, 1).
+	Padding(0, 1, 0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
 var selectedDescStyle = lipgloss.NewStyle().
-	Padding(0, 1, 1, 1).
+	Padding(0, 1, 0, 1).
 	Background(lipgloss.Color("#dde4f0")).
 	Foreground(lipgloss.AdaptiveColor{Light: "#1a1a1a", Dark: "#1a1a1a"})
 
@@ -97,8 +97,9 @@ type List struct {
 	renderer      *InstanceRenderer
 	autoyes       bool
 
-	// scrollOffset tracks the first visible line in the list for viewport scrolling
-	scrollOffset int
+	// Separate scroll offsets for the in-progress and review viewports
+	inProgressScrollOffset int
+	reviewScrollOffset     int
 
 	// map of repo name to number of instances using it. Used to display the repo name only if there are
 	// multiple repos in play.
@@ -184,7 +185,7 @@ func (r *InstanceRenderer) setWidth(width int) {
 // ɹ and ɻ are other options.
 const branchIcon = "Ꮧ"
 
-func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, hasMultipleRepos bool) string {
+func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool) string {
 	prefix := fmt.Sprintf(" %d. ", idx)
 	if idx >= 10 {
 		prefix = prefix[:len(prefix)-1]
@@ -274,14 +275,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, idx int, selected bool, h
 	remainingWidth -= prWidth
 
 	branch := i.Branch
-	if i.Started() && hasMultipleRepos {
-		repoName, err := i.RepoName()
-		if err != nil {
-			log.ErrorLog.Printf("could not get repo name in instance renderer: %v", err)
-		} else {
-			branch += fmt.Sprintf(" (%s)", repoName)
-		}
-	}
 	// Don't show branch if there's no space for it. Or show ellipsis if it's too long.
 	branchWidth := runewidth.StringWidth(branch)
 	if remainingWidth < 0 {
@@ -368,7 +361,6 @@ func (l *List) String() string {
 	header.WriteString("\n")
 	header.WriteString("\n")
 
-
 	titleWidth := AdjustPreviewWidth(l.width) + 2
 	if !l.autoyes {
 		header.WriteString(lipgloss.Place(
@@ -387,145 +379,171 @@ func (l *List) String() string {
 	headerStr := header.String()
 	headerLines := strings.Count(headerStr, "\n")
 
-	// Build the scrollable list content and track line ranges for each instance
-	var b strings.Builder
 	type instanceLineRange struct {
 		startLine int
 		endLine   int
 		inst      *session.Instance
 	}
-	var ranges []instanceLineRange
-	currentLine := 0
 
 	countLines := func(s string) int {
 		return strings.Count(s, "\n") + 1
 	}
 
+	// Helper to render a section's content
+	renderSection := func(sectionName string, groups []repoGroup, startRenderedIdx int) (string, []instanceLineRange, int) {
+		var b strings.Builder
+		var ranges []instanceLineRange
+		currentLine := 0
+		renderedIdx := startRenderedIdx
+
+		sectionHeader := sectionHeaderStyle.Render("  "+sectionName) + "\n"
+		b.WriteString(sectionHeader)
+		currentLine += countLines(sectionHeader) - 1
+
+		if len(groups) == 0 {
+			emptyStyle := lipgloss.NewStyle().
+				Foreground(lipgloss.AdaptiveColor{Light: "#999999", Dark: "#555555"})
+			b.WriteString(emptyStyle.Render("    (empty)"))
+			currentLine += 1
+		} else {
+			for groupIdx, group := range groups {
+				groupHeader := l.renderGroupHeader(group.repoName) + "\n"
+				b.WriteString(groupHeader)
+				currentLine += countLines(groupHeader) - 1
+
+				for instIdx, inst := range group.instances {
+					actualIdx := l.findInstanceIndex(inst)
+					isSelected := actualIdx == l.selectedIdx
+
+					rendered := l.renderer.Render(inst, renderedIdx+1, isSelected)
+					startLine := currentLine
+					b.WriteString(rendered)
+					currentLine += countLines(rendered) - 1
+
+					ranges = append(ranges, instanceLineRange{startLine: startLine, endLine: currentLine, inst: inst})
+					renderedIdx++
+
+					if instIdx < len(group.instances)-1 {
+						b.WriteString("\n")
+						currentLine += 1
+					}
+				}
+
+				if groupIdx < len(groups)-1 {
+					b.WriteString("\n")
+					currentLine += 1
+				}
+			}
+		}
+
+		return b.String(), ranges, renderedIdx
+	}
+
 	// Split instances into in-progress and review groups
 	inProgressGroups, reviewGroups := l.splitGroupsByReview()
-	renderedIdx := 0
 
-	// Render In Progress section
-	if len(inProgressGroups) > 0 || len(reviewGroups) > 0 {
-		sectionHeader := sectionHeaderStyle.Render("  In Progress") + "\n"
-		b.WriteString(sectionHeader)
-		currentLine += countLines(sectionHeader) - 1
+	// Count in-progress instances for continuous numbering
+	ipCount := 0
+	for _, g := range inProgressGroups {
+		ipCount += len(g.instances)
 	}
 
-	if len(inProgressGroups) > 0 {
-		for groupIdx, group := range inProgressGroups {
-			groupHeader := l.renderGroupHeader(group.repoName) + "\n"
-			b.WriteString(groupHeader)
-			currentLine += countLines(groupHeader) - 1
+	ipContent, ipRanges, _ := renderSection("In Progress", inProgressGroups, 0)
+	rvContent, rvRanges, _ := renderSection("Review", reviewGroups, ipCount)
 
-			for instIdx, inst := range group.instances {
-				actualIdx := l.findInstanceIndex(inst)
-				isSelected := actualIdx == l.selectedIdx
-
-				rendered := l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1)
-				startLine := currentLine
-				b.WriteString(rendered)
-				currentLine += countLines(rendered) - 1
-
-				ranges = append(ranges, instanceLineRange{startLine: startLine, endLine: currentLine, inst: inst})
-				renderedIdx++
-
-				if instIdx < len(group.instances)-1 {
-					b.WriteString("\n\n")
-					currentLine += 2
-				}
-			}
-
-			if groupIdx < len(inProgressGroups)-1 {
-				b.WriteString("\n\n")
-				currentLine += 2
-			}
-		}
-	}
-
-	// Render Review section
-	if len(reviewGroups) > 0 {
-		if len(inProgressGroups) > 0 {
-			b.WriteString("\n\n")
-			currentLine += 2
-		}
-		sectionHeader := sectionHeaderStyle.Render("  Review") + "\n"
-		b.WriteString(sectionHeader)
-		currentLine += countLines(sectionHeader) - 1
-
-		for groupIdx, group := range reviewGroups {
-			groupHeader := l.renderGroupHeader(group.repoName) + "\n"
-			b.WriteString(groupHeader)
-			currentLine += countLines(groupHeader) - 1
-
-			for instIdx, inst := range group.instances {
-				actualIdx := l.findInstanceIndex(inst)
-				isSelected := actualIdx == l.selectedIdx
-
-				rendered := l.renderer.Render(inst, renderedIdx+1, isSelected, len(l.repos) > 1)
-				startLine := currentLine
-				b.WriteString(rendered)
-				currentLine += countLines(rendered) - 1
-
-				ranges = append(ranges, instanceLineRange{startLine: startLine, endLine: currentLine, inst: inst})
-				renderedIdx++
-
-				if instIdx < len(group.instances)-1 {
-					b.WriteString("\n\n")
-					currentLine += 2
-				}
-			}
-
-			if groupIdx < len(reviewGroups)-1 {
-				b.WriteString("\n\n")
-				currentLine += 2
-			}
-		}
-	}
-
-	// Split content into lines for viewport scrolling
-	contentLines := strings.Split(b.String(), "\n")
-	totalLines := len(contentLines)
+	// Calculate viewport heights
 	viewportHeight := l.height - headerLines
-	if viewportHeight < 1 {
-		viewportHeight = 1
+	if viewportHeight < 4 {
+		viewportHeight = 4
 	}
 
-	// Find the line range of the selected instance and adjust scroll offset
+	rvLines := strings.Split(rvContent, "\n")
+	rvTotalLines := len(rvLines)
+
+	// Review section gets dynamic height: its content lines, capped at 1/3 of viewport, min 2 lines
+	maxReviewHeight := viewportHeight / 3
+	if maxReviewHeight < 2 {
+		maxReviewHeight = 2
+	}
+	reviewHeight := rvTotalLines
+	if reviewHeight > maxReviewHeight {
+		reviewHeight = maxReviewHeight
+	}
+	if reviewHeight < 2 {
+		reviewHeight = 2
+	}
+
+	ipHeight := viewportHeight - reviewHeight
+	if ipHeight < 2 {
+		ipHeight = 2
+	}
+
+	// Adjust scroll offsets based on selected item
+	ipContentLines := strings.Split(ipContent, "\n")
+	ipTotalLines := len(ipContentLines)
+
 	if len(l.items) > 0 {
 		selectedInst := l.items[l.selectedIdx]
-		for _, r := range ranges {
+
+		// Check if selected item is in the in-progress section
+		for _, r := range ipRanges {
 			if r.inst == selectedInst {
-				// Ensure the selected item is fully visible
-				if r.startLine < l.scrollOffset {
-					l.scrollOffset = r.startLine
+				if r.startLine < l.inProgressScrollOffset {
+					l.inProgressScrollOffset = r.startLine
 				}
-				if r.endLine >= l.scrollOffset+viewportHeight {
-					l.scrollOffset = r.endLine - viewportHeight + 1
+				if r.endLine >= l.inProgressScrollOffset+ipHeight {
+					l.inProgressScrollOffset = r.endLine - ipHeight + 1
+				}
+				break
+			}
+		}
+
+		// Check if selected item is in the review section
+		for _, r := range rvRanges {
+			if r.inst == selectedInst {
+				if r.startLine < l.reviewScrollOffset {
+					l.reviewScrollOffset = r.startLine
+				}
+				if r.endLine >= l.reviewScrollOffset+reviewHeight {
+					l.reviewScrollOffset = r.endLine - reviewHeight + 1
 				}
 				break
 			}
 		}
 	}
 
-	// Clamp scroll offset
-	if l.scrollOffset > totalLines-viewportHeight {
-		l.scrollOffset = totalLines - viewportHeight
+	// Clamp in-progress scroll
+	if l.inProgressScrollOffset > ipTotalLines-ipHeight {
+		l.inProgressScrollOffset = ipTotalLines - ipHeight
 	}
-	if l.scrollOffset < 0 {
-		l.scrollOffset = 0
+	if l.inProgressScrollOffset < 0 {
+		l.inProgressScrollOffset = 0
 	}
 
-	// Extract visible lines
-	endLine := l.scrollOffset + viewportHeight
-	if endLine > totalLines {
-		endLine = totalLines
+	// Clamp review scroll
+	if l.reviewScrollOffset > rvTotalLines-reviewHeight {
+		l.reviewScrollOffset = rvTotalLines - reviewHeight
 	}
-	visibleLines := contentLines[l.scrollOffset:endLine]
-	visibleContent := strings.Join(visibleLines, "\n")
+	if l.reviewScrollOffset < 0 {
+		l.reviewScrollOffset = 0
+	}
+
+	// Extract visible in-progress lines
+	ipEnd := l.inProgressScrollOffset + ipHeight
+	if ipEnd > ipTotalLines {
+		ipEnd = ipTotalLines
+	}
+	visibleIP := strings.Join(ipContentLines[l.inProgressScrollOffset:ipEnd], "\n")
+
+	// Extract visible review lines
+	rvEnd := l.reviewScrollOffset + reviewHeight
+	if rvEnd > rvTotalLines {
+		rvEnd = rvTotalLines
+	}
+	visibleRV := strings.Join(rvLines[l.reviewScrollOffset:rvEnd], "\n")
 
 	return lipgloss.Place(l.width, l.height, lipgloss.Left, lipgloss.Top,
-		headerStr+visibleContent)
+		headerStr+visibleIP+"\n"+visibleRV)
 }
 
 // Down selects the next item in the list based on display order.
